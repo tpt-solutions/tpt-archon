@@ -1,0 +1,22 @@
+[package]
+name = "tpt-archon-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/tpt-archon-kernel"
+keywords.workspace = true
+categories.workspace = true
+description = "Capability-based microkernel (user-space first): async scheduler, IPC, unified memory management"
+
+[features]
+default = ["std"]
+std = ["tpt-archon-core/std", "tpt-archon-bridge/std"]
+
+[dependencies]
+tpt-archon-core = { path = "../tpt-archon-core", version = "0.1.0", default-features = false }
+tpt-archon-bridge = { path = "../tpt-archon-bridge", version = "0.1.0", default-features = false }

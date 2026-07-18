@@ -1,0 +1,31 @@
+[package]
+name = "tpt-archon-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "Verification harness for tpt-archon: eidos structural invariants, telos formal proofs, and GPU IR emission smoke tests"
+
+# This crate is intentionally NOT published. It depends on git-hosted
+# ecosystem verifiers (tpt-eidos-verifier, tpt-telos-*, tpt-gpu-ir-spec), and
+# crates.io rejects git dependencies even in dev-dependencies. Keeping the
+# verification harness here (instead of in the shippable crates) is what lets
+# `cargo publish -p tpt-archon-core --dry-run` stay clean. See ADR 0003.
+
+[dependencies]
+tpt-archon-core = { path = "../tpt-archon-core", default-features = false }
+
+# Pin to exact commits known to build as consumers. Cargo records the resolved
+# commit in Cargo.lock; bump deliberately when an upstream release is validated.
+tpt-eidos-verifier = { git = "https://github.com/tpt-solutions/tpt-eidos.git", package = "tpt-eidos-verifier", rev = "517f2e1" }
+tpt-telos-verifier = { git = "https://github.com/tpt-solutions/tpt-telos.git", package = "tpt-telos-verifier", rev = "ec7faca" }
+tpt-telos-ir = { git = "https://github.com/tpt-solutions/tpt-telos.git", package = "tpt-telos-ir", rev = "ec7faca" }
+tpt-telos-parser = { git = "https://github.com/tpt-solutions/tpt-telos.git", package = "tpt-telos-parser", rev = "ec7faca" }
+tpt-gpu-ir-spec = { git = "https://github.com/tpt-solutions/tpt-gpu.git", package = "tpt-gpu-ir-spec", rev = "cb33993" }
+
+[dev-dependencies]
+tpt-archon-relational = { path = "../tpt-archon-relational", default-features = false }

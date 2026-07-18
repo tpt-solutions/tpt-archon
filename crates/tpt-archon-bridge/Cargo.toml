@@ -1,0 +1,23 @@
+[package]
+name = "tpt-archon-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/tpt-archon-bridge"
+keywords.workspace = true
+categories.workspace = true
+description = "Zero-copy IPC and unified page-cache traits gluing tpt-archon-core storage to the kernel"
+
+[features]
+default = ["std"]
+std = ["tpt-archon-core/std"]
+
+[dependencies]
+# Path dep during development; switch to a version requirement before publishing
+# (see TODO.md Phase 2a crates.io readiness).
+tpt-archon-core = { path = "../tpt-archon-core", version = "0.1.0", default-features = false }

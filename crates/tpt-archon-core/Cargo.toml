@@ -1,0 +1,22 @@
+[package]
+name = "tpt-archon-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/tpt-archon-core"
+keywords.workspace = true
+categories.workspace = true
+description = "no_std, zero-allocation storage engine: block device, page manager, WAL, B-Link tree"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+
+[dev-dependencies]

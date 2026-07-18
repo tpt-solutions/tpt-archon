@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Build tpt-archon-core (no_std, default features off)
+        run: cargo build -p tpt-archon-core --no-default-features
+      # Only tpt-archon-core has zero internal workspace (path) dependencies, so it's
+      # the one crate `cargo publish --dry-run` can check pre-release: every other
+      # crate depends on sibling crates via path, and cargo needs to resolve those
+      # path-deps' `version` against the *real* crates.io index, which only succeeds
+      # once those sibling crates are actually published there (see release.yml).
+      - name: Verify crates.io packaging (dry run)
+        run: cargo publish -p tpt-archon-core --dry-run --allow-dirty

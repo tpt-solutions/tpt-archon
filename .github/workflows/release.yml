@@ -1,0 +1,38 @@
+name: Release
+
+# Manual-dispatch only for now: tpt-archon is a multi-phase, multi-crate
+# workspace (see TODO.md) and not every crate is ready to publish yet.
+# Trigger by hand from the Actions tab, picking the crate to publish, once
+# that crate has cleared its "crates.io readiness" checklist in TODO.md.
+#
+# Required secrets:
+#   CARGO_REGISTRY_TOKEN — a crates.io API token with publish rights.
+
+on:
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: "Crate to publish (must already be listed in dependency order below if it has workspace path-deps)"
+        required: true
+        type: choice
+        options:
+          - tpt-archon-core
+          - tpt-archon-bridge
+          - tpt-archon-kernel
+          - tpt-archon-relational
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p "${{ inputs.crate }}"

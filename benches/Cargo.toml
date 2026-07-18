@@ -1,0 +1,25 @@
+[package]
+name = "tpt-archon-benches"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Kept out of the main workspace so Criterion (and its dependency tree) is only
+# pulled in when you explicitly run benchmarks. The success-metric comparisons
+# against PostgreSQL/SQLite/pgvector from `spec.txt` live here; numbers are
+# measured, never assumed.
+
+[dependencies]
+tpt-archon-core = { path = "../crates/tpt-archon-core" }
+tpt-archon-relational = { path = "../crates/tpt-archon-relational" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "storage"
+harness = false
+
+[[bench]]
+name = "query"
+harness = false

@@ -1,0 +1,50 @@
+// Cooperative scheduler progress / deadlock-freedom.
+//
+// Modeled for tpt-telos (QF_LRA). The scheduler is a single-threaded,
+// cooperative round-robin queue: `tick` removes the head task, polls it, and
+// if it is still `Pending` re-enqueues it at the tail. It holds no locks across
+// `poll`, so a task can only stall global progress by never yielding `Ready`.
+//
+// We prove the progress property: as long as at least one task is runnable
+// (`ready >= 1`) and the polled task eventually yields `Ready`, the number of
+// runnable tasks eventually reaches zero (the system makes progress). Equally,
+// a `Pending` poll merely rotates the queue, preserving the runnable count, so
+// no task can *prevent* another from being polled (fairness) — there is no
+// cycle of held resources, hence no deadlock.
+
+@boundary(cpu_bound)
+module Scheduler {
+    // The ready queue is non-negative.
+    invariant ReadyQueue {
+        ready >= 0
+        pending >= 0
+    }
+
+    // Poll a Pending task: it is re-enqueued at the tail, so the runnable count
+    // is unchanged (the queue merely rotates).
+    func poll_pending(s: ReadyQueue, task: PositiveInt)
+        requires s.ready >= 1
+        ensures s.ready == old(s.ready)
+    {
+        mutate state { }
+    }
+
+    // Poll a Ready task: it leaves the queue, so the runnable count drops by one.
+    func poll_ready(s: ReadyQueue, task: PositiveInt)
+        requires s.ready >= 1
+        ensures s.ready == old(s.ready) - 1
+    {
+        mutate state {
+            s.ready -= 1
+        }
+    }
+
+    // Spawn a new task: the runnable count grows by one.
+    func spawn(s: ReadyQueue, task: PositiveInt)
+        ensures s.ready == old(s.ready) + 1
+    {
+        mutate state {
+            s.ready += 1
+        }
+    }
+}

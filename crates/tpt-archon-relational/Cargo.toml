@@ -1,0 +1,33 @@
+[package]
+name = "tpt-archon-relational"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/tpt-archon-relational"
+keywords.workspace = true
+categories.workspace = true
+description = "AI-native relational query engine: SQL parser, planner, vectorized executor, MVCC on tpt-archon"
+
+[features]
+default = ["std"]
+std = [
+    "tpt-archon-core/std",
+    "tpt-archon-bridge/std",
+    "tpt-archon-kernel/std",
+]
+# GPU acceleration is opt-in; the engine has a CPU-only fallback path. The
+# `gpu` feature pulls in the TPTIR emitter (`tpt-gpu-ir-spec`) so a vectorized
+# top-k scan can be lowered to TPTIR text for an external GPU backend. The
+# emitter is NOT a runtime — nothing here executes on a GPU.
+gpu = ["dep:tpt-gpu-ir-spec"]
+
+[dependencies]
+tpt-archon-core = { path = "../tpt-archon-core", version = "0.1.0", default-features = false }
+tpt-archon-bridge = { path = "../tpt-archon-bridge", version = "0.1.0", default-features = false }
+tpt-archon-kernel = { path = "../tpt-archon-kernel", version = "0.1.0", default-features = false }
+tpt-gpu-ir-spec = { git = "https://github.com/tpt-solutions/tpt-gpu.git", package = "tpt-gpu-ir-spec", rev = "cb33993", optional = true }

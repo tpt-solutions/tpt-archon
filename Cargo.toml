@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tpt-archon-core",
+    "crates/tpt-archon-bridge",
+    "crates/tpt-archon-kernel",
+    "crates/tpt-archon-relational",
+    "crates/tpt-archon-verify",
+]
+# Benchmarks live in their own crate so Criterion is only built when explicitly
+# running `cargo bench` from `benches/`, keeping the main workspace lean.
+exclude = ["benches"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT OR Apache-2.0"
+authors = ["tpt-solutions"]
+repository = "https://github.com/tpt-solutions/tpt-archon"
+homepage = "https://github.com/tpt-solutions/tpt-archon"
+keywords = ["database", "storage-engine", "microkernel", "no-std", "formal-verification"]
+categories = ["database-implementations", "no-std", "data-structures"]
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,288 @@
+TPT Archon: Design Document
+Executive Summary
+TPT Archon is a vertically integrated, proof-native computing stack that eliminates the boundaries between storage, operating system, and database. Built from the inside-out using Rust's ownership model and formal verification, Archon achieves theoretical maximum performance by unifying the page cache, kernel memory management, and database buffer pool into a single, zero-copy address space.
+Core Innovation: Unlike legacy stacks (Linux + PostgreSQL + SQLite) that suffer from 30-40% CPU overhead due to middleware boundaries and double-buffering, Archon treats the storage engine, microkernel, and relational database as a single, mathematically verified continuum.
+Architecture Overview
+The Inside-Out Strategy
+Archon is built in three phases, each layer designed to perfectly accommodate the next:
+Phase 1: tpt-archon-core - The atomic, no_std, zero-allocation storage engine
+Phase 2: tpt-archon-kernel - The capability-based microkernel with unified page cache
+Phase 3: tpt-archon-relational - The AI-native, GPU-accelerated query engine
+The key insight: we build the OS before the database so the database can be natively compiled for it, but we build the storage engine first so the kernel's memory manager is designed around the storage engine's page model.
+Workspace Structure
+tpt-archon/
+├── Cargo.toml                      # Workspace root
+├── DESIGN.md                       # This document
+├── crates/
+│   ├── tpt-archon-core/            # Phase 1: Storage Engine
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── block/              # Block device abstraction
+│   │   │   ├── page/               # Page manager & buffer pool
+│   │   │   ├── wal/                # Write-ahead log
+│   │   │   └── btree/              # B-Link tree implementation
+│   │   └── Cargo.toml
+│   ├── tpt-archon-bridge/          # Zero-copy IPC & unified memory
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── ipc/                # Capability-based IPC
+│   │   │   └── memory/             # Unified page cache traits
+│   │   └── Cargo.toml
+│   ├── tpt-archon-kernel/          # Phase 2: Microkernel
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── scheduler/          # Async task scheduler
+│   │   │   ├── memory/             # Memory management
+│   │   │   ├── ipc/                # IPC message passing
+│   │   │   └── drivers/            # User-space driver framework
+│   │   └── Cargo.toml
+│   └── tpt-archon-relational/      # Phase 3: Query Engine
+│       ├── src/
+│       │   ├── lib.rs
+│       │   ├── parser/             # SQL parser
+│       │   ├── planner/            # Query optimizer
+│       │   ├── executor/           # Vectorized execution
+│       │   ├── mvcc/               # Multi-version concurrency control
+│       │   └── gpu/                # GPU-accelerated operations
+│       └── Cargo.toml
+├── formal-proofs/                  # tpt-telos verification artifacts
+├── benches/                        # Criterion benchmarks
+└── docs/                           # Architecture Decision Records
+
+Crate Specifications
+1. tpt-archon-core (The Atom)
+Purpose: A #![no_std], zero-allocation, single-file storage engine that provides mathematically verified crash-safety and concurrent access.
+Key Components:
+Block Device Abstraction
+
+pub trait BlockDevice {
+    const BLOCK_SIZE: usize = 4096; // 4KB pages
+    
+    fn read_block(&self, block_id: BlockId, buffer: &mut [u8]) -> Result<(), StorageError>;
+    fn write_block(&mut self, block_id: BlockId, data: &[u8]) -> Result<(), StorageError>;
+    fn sync(&mut self) -> Result<(), StorageError>;
+}
+
+Design Decisions:
+Uses tpt-zero-bytes for zero-allocation I/O operations
+Supports multiple backends: NVMe, memory-mapped files, in-memory (for testing)
+All operations return Result with detailed error types
+Page Manager & Buffer Pool
+Divides block device into fixed-size pages (4KB or 16KB)
+Tracks page states: Free, Clean, Dirty, Pinned
+Implements LRU eviction with dirty-page writeback
+Critical: Designed so the kernel can map these pages directly into user-space (unified page cache)
+Write-Ahead Log (WAL)
+Append-only log for crash recovery
+Every page modification is written to WAL before the main storage
+Uses Log Sequence Numbers (LSN) for ordering
+Formal Verification: tpt-telos proves the invariant: Replaying the WAL after any crash results in a consistent state
+B-Link Tree
+Concurrent B-Tree variant allowing latch-free reads
+Structural invariants enforced at compile-time via tpt-eidos
+Node capacity checked at type level (cannot overflow page size)
+Supports range scans, point lookups, and concurrent inserts
+Dependencies:
+tpt-zero-bytes (zero-allocation primitives)
+tpt-eidos (dependently typed invariants)
+tpt-telos (formal verification of WAL and B-Tree)
+2. tpt-archon-bridge (The Glue)
+Purpose: Provides the zero-copy IPC and unified memory management layer that connects the storage engine to the kernel and database.
+Key Components:
+Capability-Based IPC
+Messages are strongly typed capabilities (not raw file descriptors)
+A capability grants specific access rights (read page X, write to channel Y)
+Capabilities are unforgeable and revocable
+Implemented using tpt-eidos for type-level security
+Unified Page Cache Traits
+Defines the interface for sharing pages between kernel and storage
+Allows the kernel to map storage pages directly into database address space
+Eliminates double-buffering (no copying between kernel page cache and DB buffer pool)
+Dependencies:
+tpt-archon-core
+tpt-eidos
+3. tpt-archon-kernel (The Ruler)
+Purpose: A capability-based microkernel that provides secure, zero-copy IPC and unified memory management.
+Key Components:
+Async Task Scheduler
+Replaces process-per-connection with lightweight async tasks
+Each database connection is a Rust Task, not an OS process
+Uses io_uring for asynchronous I/O on Linux (when running as user-space)
+Formal Verification: tpt-telos proves the scheduler cannot deadlock
+Memory Management
+Unified Page Cache: The kernel's page cache and the database's buffer pool are the same thing
+Memory-mapped files with zero-copy access
+Capability-based access control (tasks can only access pages they have capabilities for)
+IPC Message Passing
+Microkernel handles only IPC, scheduling, and memory management
+Filesystems, network stacks, and drivers run in user-space as isolated services
+Messages are capability-bearing, ensuring secure resource access
+User-Space Driver Framework
+Hardware drivers run in user-space for isolation
+Kernel translates hardware interrupts into safe IPC messages
+Drivers are written in safe Rust with minimal unsafe blocks
+Dependencies:
+tpt-archon-core
+tpt-archon-bridge
+tpt-eidos
+tpt-telos
+4. tpt-archon-relational (The Application)
+Purpose: An AI-native, GPU-accelerated relational database engine that runs as a user-space service on the Archon microkernel.
+Key Components:
+SQL Parser
+Hand-written, zero-allocation parser using tpt-zero-bytes
+Supports PostgreSQL-compatible SQL dialect
+Extensible for custom types and operators
+Query Planner & Optimizer
+Cost-based optimizer with statistics collection
+AI-Native: Uses tpt-telos to generate and verify execution plans
+Supports vectorized execution for analytical workloads
+Execution Engine
+Vectorized query execution (processes batches of rows, not single rows)
+GPU Acceleration: Integrates tpt-gpu for:
+Vector similarity search (for AI workloads)
+Complex aggregations
+Machine learning UDFs
+Pushes compute down to GPU when beneficial
+MVCC (Multi-Version Concurrency Control)
+Implements Serializable isolation level
+Uses the unified page cache from tpt-archon-bridge
+Formal Verification: tpt-telos proves MVCC cannot violate serializability
+Storage Integration
+Uses tpt-archon-core for all persistence
+No separate buffer pool (uses unified page cache)
+Zero-copy access to storage pages
+Dependencies:
+tpt-archon-core
+tpt-archon-bridge
+tpt-archon-kernel
+tpt-gpu
+tpt-eidos
+tpt-telos
+Dependency Graph
+tpt-archon-relational
+    ↓
+tpt-archon-kernel
+    ↓
+tpt-archon-bridge
+    ↓
+tpt-archon-core
+
+Enforcement: This dependency graph is strictly enforced in the workspace Cargo.toml. Each crate can only depend on crates below it in the stack.
+TPT Ecosystem Integration
+tpt-zero-bytes
+Used throughout for zero-allocation parsing and I/O
+Ensures no hidden Vec allocations in critical paths
+tpt-eidos
+Enforces capability-based security at the type level
+Makes structural invariants (B-Tree node capacity, page size) compile-time guarantees
+Prevents entire classes of bugs before runtime
+tpt-telos
+Formally verifies critical invariants:
+WAL crash recovery consistency
+B-Tree structural integrity
+MVCC serializability
+Scheduler deadlock-freedom
+Provides mathematical proof of correctness, not just testing
+tpt-gpu
+Integrated into the query execution engine
+Provides hardware-agnostic GPU compute (CUDA, ROCm, Metal, TPT ISA)
+Accelerates vector search, aggregations, and ML UDFs
+Performance Advantages
+Eliminating the Middleware Tax
+Legacy stacks suffer from multiple layers of data copying:
+Disk → Kernel Page Cache (OS read)
+Kernel Page Cache → Database Buffer Pool (DB read)
+Database Buffer Pool → Query Executor (in-DB copy)
+Query Executor → Network Socket (response)
+Archon's Solution:
+Unified page cache eliminates steps 1-2 (kernel and DB share the same cache)
+Zero-copy IPC eliminates step 3 (capabilities grant direct memory access)
+Direct network integration eliminates step 4
+Expected Performance Gain: 30-40% reduction in CPU overhead for I/O-bound workloads.
+Zero-Allocation Critical Paths
+By using tpt-zero-bytes and #![no_std] in the core, Archon eliminates:
+Garbage collection pauses (no GC in Rust, but also no allocator overhead)
+Memory fragmentation
+Allocation-related latency spikes
+GPU-Native Execution
+Unlike PostgreSQL (which requires extensions like pgvector) or SQLite (which has no GPU support), Archon natively integrates tpt-gpu for:
+Vector similarity search (for RAG, embeddings)
+Complex analytical queries
+Machine learning inference
+Formal Verification Strategy
+What We Verify
+Storage Layer (tpt-archon-core):
+WAL replay produces consistent state after any crash
+B-Tree operations maintain structural invariants
+Page allocation is free of use-after-free and double-free
+Kernel Layer (tpt-archon-kernel):
+Scheduler is deadlock-free
+IPC message passing is free of data races
+Capability system prevents unauthorized access
+Relational Layer (tpt-archon-relational):
+MVCC maintains serializability under all concurrency patterns
+Query optimizer produces correct execution plans
+GPU operations are memory-safe
+How We Verify
+tpt-telos: Generates formal proofs in Coq/Lean for critical algorithms
+tpt-eidos: Enforces invariants at compile-time via dependent types
+tpt-formal-lab: Provides the verification framework and proof automation
+Verification as a Moat
+Legacy databases rely on thousands of unit tests and fuzzing to find bugs. Archon uses mathematical proof to guarantee correctness. This is a fundamental competitive advantage that cannot be easily replicated by C/C++ codebases.
+Execution Plan
+Phase 1: Storage Engine (Months 1-3)
+Goal: Build a production-ready, no_std storage engine that can replace SQLite.
+Milestones:
+Week 1-2: Implement BlockDevice trait and InMemoryBlockDevice for testing
+Week 3-4: Build page manager with LRU eviction and dirty-page tracking
+Week 5-6: Implement WAL with LSN-based ordering and crash recovery
+Week 7-8: Build B-Link tree with concurrent access support
+Week 9-10: Integrate tpt-telos to verify WAL and B-Tree invariants
+Week 11-12: Benchmark against SQLite, optimize critical paths
+Deliverable: tpt-archon-core crate, ready for embedding.
+Phase 2: Microkernel (Months 4-6)
+Goal: Build a capability-based microkernel with unified page cache.
+Milestones:
+Month 4: Implement async task scheduler with io_uring backend
+Month 5: Build capability-based IPC system
+Month 6: Integrate unified page cache (kernel + storage share memory)
+Deliverable: tpt-archon-kernel and tpt-archon-bridge crates.
+Phase 3: Relational Engine (Months 7-12)
+Goal: Build a PostgreSQL-compatible, GPU-accelerated query engine.
+Milestones:
+Month 7-8: Implement SQL parser and basic query execution
+Month 9-10: Build MVCC with serializable isolation
+Month 11: Integrate tpt-gpu for vector search and aggregations
+Month 12: Formal verification of MVCC and query optimizer
+Deliverable: tpt-archon-relational crate, full database stack operational.
+Success Metrics
+Performance
+I/O-bound workloads: 30% faster than PostgreSQL (due to eliminated middleware tax)
+Embedded workloads: 2x faster than SQLite (due to zero-allocation design)
+Vector search: 10x faster than pgvector (due to native GPU integration)
+Correctness
+Zero CVEs: Formal verification eliminates entire classes of vulnerabilities
+Zero silent data corruption: Mathematical proof of crash consistency
+Zero race conditions: Capability-based IPC prevents data races
+Developer Experience
+Single binary: Storage, kernel, and database compile to one executable
+PostgreSQL-compatible: Drop-in replacement for most PostgreSQL workloads
+SQLite-compatible: Can be embedded in applications like SQLite
+Risk Mitigation
+Risk 1: Microkernel Complexity
+Mitigation: Start with a user-space implementation (running on Linux) before attempting bare-metal. This allows us to validate the architecture without writing hardware drivers.
+Risk 2: SQL Compatibility
+Mitigation: Focus on PostgreSQL compatibility first (most widely used). SQLite compatibility can be added later as a separate compatibility layer.
+Risk 3: Formal Verification Overhead
+Mitigation: Only verify critical invariants (WAL, MVCC, scheduler). Use tpt-eidos for compile-time checks where possible (cheaper than full formal verification).
+Conclusion
+TPT Archon is not just a rewrite of Linux, SQLite, and PostgreSQL in Rust. It is a fundamentally new computing stack that eliminates the boundaries between storage, OS, and database.
+By building inside-out, leveraging formal verification, and integrating GPU acceleration natively, Archon achieves performance and correctness that legacy C/C++ stacks cannot match.
+The key insight: You don't need to rewrite the entire stack at once. Start with the atomic storage engine (tpt-archon-core), and let the kernel and database naturally wrap around it.
+Next Steps
+Initialize the tpt-archon workspace
+Create the tpt-archon-core crate
+Implement the BlockDevice trait and InMemoryBlockDevice
+Begin building the page manager
+The journey of a thousand miles begins with a single 4KB page.
