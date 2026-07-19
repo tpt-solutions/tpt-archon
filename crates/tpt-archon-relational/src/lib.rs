@@ -8,7 +8,9 @@
 
 extern crate alloc;
 
+pub mod database;
 pub mod executor;
+pub mod explain;
 pub mod mvcc;
 pub mod parser;
 pub mod planner;

@@ -278,6 +278,15 @@ impl<D: BlockDevice> BufferPool<D> {
     }
 
     /// Writes all dirty frames back to the device and syncs it.
+    ///
+    /// Note: a frame that is still `Pinned` but carries `dirty_intent` (i.e. a
+    /// `fetch_mut` that has not yet been `unpin`ned) is also flushed. This is
+    /// intentional — a flush is allowed to underpin an in-flight pin — but it
+    /// means an unpin-then-uncommitted mutation will persist on `flush_all`
+    /// even though the surrounding transaction may not have committed. For
+    /// single-threaded use that is benign; callers wanting strict
+    /// commit-scoped durability should `unpin` only after commit (or route
+    /// the write through the WAL first — see the `StorageEngine` facade).
     pub fn flush_all(&mut self) -> Result<(), StorageError> {
         for idx in 0..self.frames.len() {
             if self.frames[idx].state == PageState::Dirty
@@ -301,6 +310,14 @@ impl<D: BlockDevice> BufferPool<D> {
     /// Consumes the pool, returning the underlying device.
     pub fn into_device(self) -> D {
         self.device
+    }
+
+    /// Borrows the underlying device mutably without consuming the pool.
+    ///
+    /// Useful for recovery paths that must write pages directly to the device
+    /// (e.g. replaying a WAL) while the pool stays alive.
+    pub fn device_mut(&mut self) -> &mut D {
+        &mut self.device
     }
 }
 

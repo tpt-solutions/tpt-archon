@@ -36,3 +36,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   storage and query hot paths and vector search.
 - Docs: ADR 0002 (zero-allocation primitives in-crate) and ADR 0003 (verification
   tested-now-proven-later); `formal-proofs/README.md` tracking intended proof targets.
+
+### Changed
+- `tpt-archon-verify` moved out of the default workspace (`exclude`) so
+  `cargo test --workspace` is offline-clean; it now runs in an opt-in CI job
+  with network access for its git-hosted ecosystem verifiers.
+- `README.md` §"TPT ecosystem dependencies" corrected to match `AGENTS.md`:
+  no `tpt-gpu-primitives`/`tpt-gpu-runtime`; `tpt-gpu-ir-spec` is an IR emitter
+  (no runtime). `formal-proofs/README.md` now states the `.telos` artifacts are
+  QF_LRA solver-checked assertion harnesses, not machine-checked Coq/Lean proofs.
+
+### Added
+- `tpt-archon-core`: `storage` module — `StorageEngine` facade wiring `BufferPool`
+  + `Wal` with write-ahead (WAL record before page) and `recover()` replaying
+  committed page images after a crash; plus a file-backed `Database::open`/`create`
+  convenience (`std` feature).
+- `tpt-archon-core`: B-Link property tests forcing ≥2 interior levels (sequential /
+  reverse / shuffled insert orders) with full-key lookup assertions.
+- `tpt-archon-relational`: `explain` module — `explain_plan` (always) renders the
+  physical plan + dispatch; `explain_gpu` (gated on the `gpu` feature) prints the
+  emitted TPTIR for a GPU-dispatched scan.

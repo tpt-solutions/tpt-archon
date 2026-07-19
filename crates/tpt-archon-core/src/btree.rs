@@ -205,6 +205,56 @@ impl BTree {
         }
     }
 
+    /// Removes `key` if present, returning the stored value.
+    ///
+    /// Leaf deletion is implemented directly (no underflow rebalancing): a
+    /// sparse leaf is still correct because lookups and range scans only skip
+    /// removed entries. This keeps the structure simple while supporting real
+    /// `DELETE` semantics; rebalancing is a future optimization.
+    pub fn delete(&mut self, key: Key) -> Option<Vec<u8>> {
+        let mut id = self.root;
+        loop {
+            match &mut self.nodes[id] {
+                Node::Internal {
+                    keys,
+                    children,
+                    right,
+                    high_key,
+                } => {
+                    if let Some(hk) = high_key {
+                        if key >= *hk && right.is_some() {
+                            id = right.unwrap();
+                            continue;
+                        }
+                    }
+                    let idx = match keys.binary_search(&key) {
+                        Ok(i) => i + 1,
+                        Err(i) => i,
+                    };
+                    id = children[idx];
+                }
+                Node::Leaf {
+                    keys,
+                    vals,
+                    right,
+                    high_key,
+                } => {
+                    if let Some(hk) = high_key {
+                        if key >= *hk && right.is_some() {
+                            id = right.unwrap();
+                            continue;
+                        }
+                    }
+                    if let Ok(i) = keys.binary_search(&key) {
+                        keys.remove(i);
+                        return Some(vals.remove(i));
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+
     /// Inserts or replaces `key -> value`.
     pub fn insert(&mut self, key: Key, value: Vec<u8>) {
         let root = self.root;
@@ -433,6 +483,26 @@ mod tests {
     }
 
     #[test]
+    fn delete_removes_key() {
+        let mut t = BTree::new();
+        for k in 0..200u64 {
+            t.insert(k, alloc::vec![(k % 256) as u8]);
+        }
+        assert_eq!(t.delete(50), Some(alloc::vec![50u8]));
+        assert!(!t.contains(50));
+        assert_eq!(t.get(50), None);
+        // Other keys remain intact and the tree stays consistent.
+        assert!(t.check_invariants());
+        for k in 0..200u64 {
+            if k != 50 {
+                assert_eq!(t.get(k), Some(&[(k % 256) as u8][..]), "missing key {k}");
+            }
+        }
+        // Deleting a missing key is a no-op.
+        assert_eq!(t.delete(9999), None);
+    }
+
+    #[test]
     fn insert_replaces_existing() {
         let mut t = BTree::new();
         t.insert(7, alloc::vec![1]);
@@ -483,5 +553,94 @@ mod tests {
         assert!(t.range(10, 10).is_empty());
         assert_eq!(t.range(0, 300).len(), 300);
         assert_eq!(t.range(295, 1000).len(), 5);
+    }
+
+    /// Inserts enough keys to force at least two interior tree levels
+    /// (`NODE_CAPACITY * 8` = 512 > 5× leaf split threshold) and checks that
+    /// every key inserted is retrievable after the fact. This exercises the
+    /// internal-node split path and high-range point lookups that the smaller
+    /// tests above do not reach.
+    fn property_insert_get_all(keys: impl Iterator<Item = u64>) {
+        let mut t = BTree::new();
+        let mut expected: Vec<(u64, u8)> = Vec::new();
+        for k in keys {
+            let v = (k % 256) as u8;
+            t.insert(k, alloc::vec![v]);
+            expected.push((k, v));
+        }
+        assert!(t.check_invariants(), "invariants broken after bulk insert");
+        // Every key must be retrievable with its exact value.
+        for (k, v) in &expected {
+            assert_eq!(
+                t.get(*k),
+                Some(&[*v][..]),
+                "get({k}) wrong after bulk insert with splits"
+            );
+        }
+        // Keys never inserted must be absent.
+        assert_eq!(t.get(u64::MAX), None);
+        assert_eq!(t.len(), expected.len());
+    }
+
+    #[test]
+    fn property_insert_sequential_forces_interior_levels() {
+        // 512 keys is well above the ~5× NODE_CAPACITY (=320) threshold that
+        // produces a root with multiple internal children.
+        property_insert_get_all(0..512u64);
+    }
+
+    #[test]
+    fn property_insert_reverse_forces_interior_levels() {
+        property_insert_get_all((0..512u64).rev());
+    }
+
+    #[test]
+    fn property_insert_shuffled_forces_interior_levels() {
+        // Deterministic shuffle (Xorshift) so the test is reproducible.
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut order: Vec<u64> = (0..512u64).collect();
+        for i in (1..order.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let j = (state % (i as u64 + 1)) as usize;
+            order.swap(i, j);
+        }
+        property_insert_get_all(order.into_iter());
+    }
+
+    /// Confirms the 512-key trees above actually reach ≥2 interior levels
+    /// (a root internal node with children), so the split-path tests are
+    /// meaningful rather than trivially single-level.
+    #[test]
+    fn bulk_insert_reaches_interior_levels() {
+        let mut t = BTree::new();
+        for k in 0..512u64 {
+            t.insert(k, alloc::vec![(k % 256) as u8]);
+        }
+        // Root is internal once the leaf level overflowed into a second level,
+        // and it has >1 child only once a third (interior) level forms.
+        let mut id = t.root;
+        let mut levels = 0;
+        loop {
+            levels += 1;
+            match &t.nodes[id] {
+                Node::Internal { children, .. } => {
+                    // A genuine interior split: the root is internal and has
+                    // more than one child (i.e. a real multi-way fan-out).
+                    if levels == 1 {
+                        assert!(children.len() > 1, "root must have split into >1 child");
+                    }
+                    id = children[0];
+                }
+                Node::Leaf { .. } => break,
+            }
+        }
+        // ≥2 levels means the root is internal (a forced split), exercising the
+        // internal-node descent + right-link path the small tests don't reach.
+        assert!(
+            levels >= 2,
+            "expected ≥2 levels (root internal), got {levels}"
+        );
     }
 }

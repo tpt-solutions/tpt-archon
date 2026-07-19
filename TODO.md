@@ -163,6 +163,39 @@ service on the Archon microkernel. Depends on all three crates above.
 
 - [x] `crates/tpt-archon-verify` — non-published verification harness exercising the live ecosystem verifiers: `tpt-eidos-verifier` (B-Link node-capacity invariant), `tpt-telos-verifier` (WAL replay + MVCC serializability), and `tpt-gpu-ir-spec` (top-k scan TPTIR emission). Kept out of the shippable crates so `cargo publish -p tpt-archon-core --dry-run` stays clean (crates.io rejects git deps even in dev-deps).
 - [x] Criterion benchmarks in `benches/` validating the specific numbers in `spec.txt`'s "Success Metrics": 30% faster than PostgreSQL (I/O-bound), 2x SQLite (embedded), 10x pgvector (vector search) — track actual measured numbers, don't assume the spec's targets are met (bench harness scaffolded in `benches/` for storage + query hot paths and vector search; external DB comparison harnesses still to be added, and no target is assumed met until measured)
-- [x] `formal-proofs/` — machine-checked `.telos` artifacts for each verified invariant (WAL, B-Tree, MVCC, scheduler), checked into the repo and discharged by `cargo test -p tpt-archon-verify` via `tpt-telos-verifier` (see `formal-proofs/README.md`). NOTE: `tpt-telos` has no Coq/Lean backend — its codegen targets Rust/Go; the `.telos` sources + passing harness tests are the authoritative artifacts. The node-capacity page-fit bound is proven separately with `tpt-eidos-verifier`.
+- [x] `formal-proofs/` — QF_LRA **assertion-harness** `.telos` artifacts for each verified invariant (WAL, B-Tree, MVCC, scheduler), checked into the repo and discharged by `cargo test -p tpt-archon-verify` via `tpt-telos-verifier` (see `formal-proofs/README.md`). These are **solver-checked regression tests, not machine-checked Coq/Lean proofs**; QF_LRA cannot express multi-interleaving serializability or capability unforgeability, so the docs say so plainly. `tpt-telos` has no Coq/Lean backend — its codegen targets Rust/Go; the `.telos` sources + passing harness tests are the authoritative artifacts. The node-capacity page-fit bound is proven separately with `tpt-eidos-verifier`.
 - [x] ADRs in `docs/` for major architectural decisions as they're made (not just ADR 0001) (added ADR 0002 zero-alloc primitives, ADR 0003 verification tested-now-proven-later)
 - [x] Zero-CVE / zero-silent-corruption / zero-race-condition claims in `spec.txt` are marketing language until backed by the formal verification work above — don't repeat them in crate descriptions until proofs exist (no such claims appear in any crate `description`/docs; enforced by ADR 0003)
+
+---
+
+## Phase 4 — Trust, supply-chain & adoption hardening (post-review)
+
+Handover work from the platform review (`platform-review-bugs-adoption` plan).
+Ordered de-risk-first; trust fixes are done, correctness/adoption tasks remain.
+
+### 4.1 Trust & supply-chain fixes (DONE)
+- [x] Exclude `crates/tpt-archon-verify` from the default workspace (`exclude = ["benches", "crates/tpt-archon-verify"]` in root `Cargo.toml`) so `cargo test --workspace` is offline-clean and the 4 shippable crates gate the run.
+- [x] Add opt-in `verify` CI job (network access) running `cargo test -p tpt-archon-verify`; keep the `test` job offline for the shippable crates.
+- [x] Fix `README.md` §"TPT ecosystem dependencies" to match AGENTS.md: drop the nonexistent `tpt-gpu-primitives`/`tpt-gpu-runtime`; document `tpt-gpu-ir-spec` as an IR **emitter** (no runtime), and that the verifier git deps live only in the non-published `tpt-archon-verify` harness.
+- [x] Clarify `formal-proofs/README.md`: the `.telos` sources are QF_LRA **solver-checked assertion harnesses**, not machine-checked Coq/Lean proofs; state QF_LRA's limits plainly.
+- [x] Reconciled TODO files: `TODO.md` is the single source of truth; the drifted `TODO 1260719.md` is retained for history but no longer authoritative.
+
+### 4.2 Correctness tests (cheap, high value)
+- [x] Add a B-Link property test forcing ≥2 interior levels: `insert(0..512)` then `assert get(k) == v` for all k, across insert orders (sequential / reverse / shuffled) plus a `bulk_insert_reaches_interior_levels` height check (`crates/tpt-archon-core/src/btree.rs`).
+- [x] Document (don't "fix") `BufferPool::flush_all` writing `Pinned` frames with `dirty_intent` set — note that an unpinned-then-uncommitted `fetch_mut` persists on flush (`crates/tpt-archon-core/src/page.rs`).
+
+### 4.3 Make it real (adoption-critical)
+- [x] End-to-end WAL↔storage: a `StorageEngine` facade in `core` (`storage.rs`) wrapping `BufferPool` + `Wal`, appending a `PageWrite` WAL record *before* the page reaches the pool, with `recover()` replaying committed page images after a crash. Includes unit tests for write-before-storage, recover-after-crash, and torn-tail truncation.
+- [x] `core::Database::open(path)` / `create(path)` convenience over `FileBlockDevice` (std feature), so "embeddable SQLite" is actually exercisable (`storage.rs`).
+- [ ] Wire `relational` to store rows via `core`/`btree` (today `executor::Table` is an in-memory `Vec<Row>`; the unified-page-cache story is unexercised by the query engine).
+- [ ] At least `INSERT INTO t(c,…) VALUES (…)` (then `UPDATE`/`DELETE`) so the engine is usable, not just queryable.
+- [ ] `f32[]` column type + `SELECT … ORDER BY cosine(emb, ?) LIMIT k` so the vector/RAG story has a real table/column backing `vector_topk`.
+
+### 4.4 Show it / differentiate
+- [x] `EXPLAIN` support in `relational` (`explain.rs`): `explain_plan` (always) renders the physical plan + dispatch; `explain_gpu` (gated on the `gpu` feature) prints the emitted TPTIR from `relational::gpu` for a GPU-dispatched scan — turns the emit-only GPU path into a demo-able feature.
+- [ ] Capability-scoped multi-tenant demo (the `bridge` capability system is only unit-tested today).
+- [ ] `faultsim` test mode: randomly drop/corrupt WAL tail bytes, assert `recover()` always yields a prefix-consistent state.
+- [ ] `no_std` + `alloc`-only embedded CI target (compile-only, e.g. `cortex-m`) to prove the embeddable claim.
+- [ ] `docs/GETTING_STARTED.md` + per-crate "What this crate is NOT (yet)" lines (ADR 0003 honesty).
+- [ ] `cargo generate` template (`template/`) scaffolding a `Database::open` + INSERT/SELECT app — highest-leverage adoption move.

@@ -15,13 +15,15 @@ use crate::planner::{Plan, PlanNode};
 /// Rows processed per vectorized batch.
 pub const BATCH_SIZE: usize = 1024;
 
-/// A single value in a row (integers or short byte strings).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A single value in a row (integers, text, or an embedding vector).
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// A 64-bit integer.
     Int(i64),
     /// A UTF-8 text value.
     Text(String),
+    /// A fixed-width `f32` embedding vector (the `f32[]` column type).
+    Vector(Vec<f32>),
 }
 
 /// A row: values positionally aligned with the table's column names.
@@ -61,7 +63,7 @@ pub enum ExecError {
 }
 
 /// The result of running a query: output column names and rows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResultSet {
     /// Output column names.
     pub columns: Vec<String>,
@@ -70,6 +72,12 @@ pub struct ResultSet {
 }
 
 fn cmp_matches(op: CmpOp, lhs: i64, rhs: i64) -> bool {
+    cmp_matches_pub(op, lhs, rhs)
+}
+
+/// Public comparison helper used by the [`database`](crate::database) module's
+/// predicate evaluation over stored rows.
+pub fn cmp_matches_pub(op: CmpOp, lhs: i64, rhs: i64) -> bool {
     match op {
         CmpOp::Eq => lhs == rhs,
         CmpOp::Ne => lhs != rhs,
@@ -117,7 +125,9 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
                                 rows.push(row.clone());
                             }
                         }
-                        Value::Text(_) => return Err(ExecError::TypeMismatch),
+                        Value::Text(_) | Value::Vector(_) => {
+                            return Err(ExecError::TypeMismatch)
+                        }
                     }
                 }
             }

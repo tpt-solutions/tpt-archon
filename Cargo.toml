@@ -5,11 +5,19 @@ members = [
     "crates/tpt-archon-bridge",
     "crates/tpt-archon-kernel",
     "crates/tpt-archon-relational",
-    "crates/tpt-archon-verify",
 ]
 # Benchmarks live in their own crate so Criterion is only built when explicitly
 # running `cargo bench` from `benches/`, keeping the main workspace lean.
-exclude = ["benches"]
+#
+# `tpt-archon-verify` is intentionally NOT a default workspace member: it pulls
+# git-hosted ecosystem verifiers (`tpt-eidos-verifier`, `tpt-telos-*`,
+# `tpt-gpu-ir-spec`). If it stayed a member, `cargo test --workspace` would
+# require network access to those git repos on every fresh CI run, breaking the
+# offline-clean adoption story. It is built/tested by an opt-in job in
+# `.github/workflows/ci.yml` (the `verify` job), which has network access.
+# `cargo publish -p tpt-archon-core --dry-run` stays clean because the
+# verifier git deps never enter a shippable crate. See ADR 0003.
+exclude = ["benches", "crates/tpt-archon-verify"]
 
 [workspace.package]
 version = "0.1.0"
