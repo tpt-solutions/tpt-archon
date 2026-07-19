@@ -34,6 +34,7 @@ extern crate alloc;
 
 pub mod block;
 pub mod btree;
+pub mod faultsim;
 pub mod page;
 pub mod storage;
 pub mod wal;

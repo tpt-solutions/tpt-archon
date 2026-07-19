@@ -125,9 +125,7 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
                                 rows.push(row.clone());
                             }
                         }
-                        Value::Text(_) | Value::Vector(_) => {
-                            return Err(ExecError::TypeMismatch)
-                        }
+                        Value::Text(_) | Value::Vector(_) => return Err(ExecError::TypeMismatch),
                     }
                 }
             }

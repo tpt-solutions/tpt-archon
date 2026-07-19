@@ -188,14 +188,14 @@ Ordered de-risk-first; trust fixes are done, correctness/adoption tasks remain.
 ### 4.3 Make it real (adoption-critical)
 - [x] End-to-end WAL↔storage: a `StorageEngine` facade in `core` (`storage.rs`) wrapping `BufferPool` + `Wal`, appending a `PageWrite` WAL record *before* the page reaches the pool, with `recover()` replaying committed page images after a crash. Includes unit tests for write-before-storage, recover-after-crash, and torn-tail truncation.
 - [x] `core::Database::open(path)` / `create(path)` convenience over `FileBlockDevice` (std feature), so "embeddable SQLite" is actually exercisable (`storage.rs`).
-- [ ] Wire `relational` to store rows via `core`/`btree` (today `executor::Table` is an in-memory `Vec<Row>`; the unified-page-cache story is unexercised by the query engine).
-- [ ] At least `INSERT INTO t(c,…) VALUES (…)` (then `UPDATE`/`DELETE`) so the engine is usable, not just queryable.
-- [ ] `f32[]` column type + `SELECT … ORDER BY cosine(emb, ?) LIMIT k` so the vector/RAG story has a real table/column backing `vector_topk`.
+- [x] Wire `relational` to store rows via `core`/`btree` (`relational::database::Database` stores every row in `tpt-archon-core`'s B-Link tree; no separate `Vec<Row>` buffer pool — `crates/tpt-archon-relational/src/database.rs`).
+- [x] At least `INSERT INTO t(c,…) VALUES (…)` (then `UPDATE`/`DELETE`) so the engine is usable, not just queryable (`database.rs` `run_insert`/`run_update`/`run_delete`, exercised by `execute_dispatch_insert_select_update_delete`).
+- [x] `f32[]` column type + `SELECT … ORDER BY cosine(emb, ?) LIMIT k` so the vector/RAG story has a real table/column backing `vector_topk` (`ColumnType::Vector` + `run_vector_topk`).
 
 ### 4.4 Show it / differentiate
 - [x] `EXPLAIN` support in `relational` (`explain.rs`): `explain_plan` (always) renders the physical plan + dispatch; `explain_gpu` (gated on the `gpu` feature) prints the emitted TPTIR from `relational::gpu` for a GPU-dispatched scan — turns the emit-only GPU path into a demo-able feature.
-- [ ] Capability-scoped multi-tenant demo (the `bridge` capability system is only unit-tested today).
-- [ ] `faultsim` test mode: randomly drop/corrupt WAL tail bytes, assert `recover()` always yields a prefix-consistent state.
-- [ ] `no_std` + `alloc`-only embedded CI target (compile-only, e.g. `cortex-m`) to prove the embeddable claim.
-- [ ] `docs/GETTING_STARTED.md` + per-crate "What this crate is NOT (yet)" lines (ADR 0003 honesty).
-- [ ] `cargo generate` template (`template/`) scaffolding a `Database::open` + INSERT/SELECT app — highest-leverage adoption move.
+- [x] Capability-scoped multi-tenant demo (`crates/tpt-archon-bridge/examples/multi_tenant.rs`): two tenants share one unified page cache; per-tenant capabilities scope access, cross-tenant access denied, revocation enforced via issuer re-validation.
+- [x] `faultsim` test mode: randomly drop/corrupt/zero WAL tail bytes, assert `recover()` always yields a prefix-consistent state (`crates/tpt-archon-core/src/faultsim.rs`, `cargo test -p tpt-archon-core faultsim`).
+- [ ] `no_std` + `alloc`-only embedded CI target (compile-only, e.g. `cortex-m`) to prove the embeddable claim (needs a cross target/toolchain in CI; core is `no_std`-clean by construction but the target build is not wired into `ci.yml` yet).
+- [x] `docs/GETTING_STARTED.md` + per-crate "What this crate is NOT (yet)" lines (ADR 0003 honesty) (`docs/GETTING_STARTED.md`).
+- [x] `cargo generate` template (`template/`) scaffolding a `Database::open` + INSERT/SELECT app — highest-leverage adoption move.

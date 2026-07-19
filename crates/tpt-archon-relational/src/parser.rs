@@ -262,7 +262,13 @@ impl<'a> Lexer<'a> {
                         .map_err(|_| ParseError("invalid integer".to_string()))
                 }
             }
-            c if c.is_ascii_alphabetic() || c == b'_' || c == b'(' || c == b')' || c == b'[' || c == b']' => {
+            c if c.is_ascii_alphabetic()
+                || c == b'_'
+                || c == b'('
+                || c == b')'
+                || c == b'['
+                || c == b']' =>
+            {
                 let start = self.pos;
                 while self.pos < b.len()
                     && (b[self.pos].is_ascii_alphanumeric() || b[self.pos] == b'_')
@@ -440,15 +446,9 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
         Tok::Ident(kw) if eq_ignore_case(kw, "select") => {
             parse_select(input).map(Statement::Select)
         }
-        Tok::Ident(kw) if eq_ignore_case(kw, "insert") => {
-            parse_insert(lx).map(Statement::Insert)
-        }
-        Tok::Ident(kw) if eq_ignore_case(kw, "update") => {
-            parse_update(lx).map(Statement::Update)
-        }
-        Tok::Ident(kw) if eq_ignore_case(kw, "delete") => {
-            parse_delete(lx).map(Statement::Delete)
-        }
+        Tok::Ident(kw) if eq_ignore_case(kw, "insert") => parse_insert(lx).map(Statement::Insert),
+        Tok::Ident(kw) if eq_ignore_case(kw, "update") => parse_update(lx).map(Statement::Update),
+        Tok::Ident(kw) if eq_ignore_case(kw, "delete") => parse_delete(lx).map(Statement::Delete),
         _ => Err(ParseError(
             "expected SELECT, INSERT, UPDATE, or DELETE".to_string(),
         )),
@@ -522,8 +522,8 @@ fn parse_insert(mut lx: Lexer) -> Result<InsertStatement, ParseError> {
                 let col = expect_ident(&mut lx, "column name")?;
                 columns.push(col);
                 match lx.next_tok()? {
-                    Tok::Ident(q) if q == "," => continue,
-                    Tok::Ident(q) if q == ")" => break,
+                    Tok::Ident(",") => continue,
+                    Tok::Ident(")") => break,
                     _ => return Err(ParseError("expected ',' or ')'".to_string())),
                 }
             }
@@ -538,7 +538,7 @@ fn parse_insert(mut lx: Lexer) -> Result<InsertStatement, ParseError> {
     }
     // (v1, v2, ...)
     match lx.next_tok()? {
-        Tok::Ident(p) if p == "(" => {}
+        Tok::Ident("(") => {}
         _ => return Err(ParseError("expected '(' before values".to_string())),
     }
     let mut values = Vec::new();
@@ -546,13 +546,13 @@ fn parse_insert(mut lx: Lexer) -> Result<InsertStatement, ParseError> {
         let value = match lx.next_tok()? {
             Tok::Int(v) => Literal::Int(v),
             Tok::Text(s) => Literal::Text(s.to_string()),
-            Tok::Ident(p) if p == "[" => parse_vector_literal(&mut lx)?,
+            Tok::Ident("[") => parse_vector_literal(&mut lx)?,
             _ => return Err(ParseError("expected a value".to_string())),
         };
         values.push(value);
         match lx.next_tok()? {
-            Tok::Ident(q) if q == "," => continue,
-            Tok::Ident(q) if q == ")" => break,
+            Tok::Ident(",") => continue,
+            Tok::Ident(")") => break,
             _ => return Err(ParseError("expected ',' or ')'".to_string())),
         }
     }
@@ -582,7 +582,7 @@ fn parse_update(mut lx: Lexer) -> Result<UpdateStatement, ParseError> {
         let value = match lx.next_tok()? {
             Tok::Int(v) => Literal::Int(v),
             Tok::Text(s) => Literal::Text(s.to_string()),
-            Tok::Ident(p) if p == "[" => parse_vector_literal(&mut lx)?,
+            Tok::Ident("[") => parse_vector_literal(&mut lx)?,
             _ => return Err(ParseError("expected a value in assignment".to_string())),
         };
         assignments.push(Assignment { column, value });
@@ -595,19 +595,11 @@ fn parse_update(mut lx: Lexer) -> Result<UpdateStatement, ParseError> {
                         let column = expect_ident(&mut lx, "column in WHERE")?;
                         let op = match lx.next_tok()? {
                             Tok::Op(op) => op,
-                            _ => {
-                                return Err(ParseError(
-                                    "expected operator in WHERE".to_string(),
-                                ))
-                            }
+                            _ => return Err(ParseError("expected operator in WHERE".to_string())),
                         };
                         let value = match lx.next_tok()? {
                             Tok::Int(v) => v,
-                            _ => {
-                                return Err(ParseError(
-                                    "expected integer in WHERE".to_string(),
-                                ))
-                            }
+                            _ => return Err(ParseError("expected integer in WHERE".to_string())),
                         };
                         let filter = Some(Predicate { column, op, value });
                         if lx.next_tok()? != Tok::Eof {

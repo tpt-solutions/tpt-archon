@@ -1,0 +1,20 @@
+# cargo-generate template for a minimal tpt-archon app.
+#
+# Scaffolds a binary that opens a file-backed database (tpt-archon-core) and
+# runs an INSERT + SELECT via the relational layer. Install cargo-generate:
+#
+#   cargo install cargo-generate
+#   cargo generate --git https://github.com/tpt-solutions/tpt-archon --path template
+#
+# The `{{project-name}}` token is substituted by cargo-generate.
+
+[package]
+name = "{{project-name}}"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tpt-archon-core = { version = "0.1.0", features = ["std"] }
+tpt-archon-relational = { version = "0.1.0" }

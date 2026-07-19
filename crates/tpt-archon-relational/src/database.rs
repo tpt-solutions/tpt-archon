@@ -277,7 +277,10 @@ impl Database {
 
     /// Returns the row ids whose `Int` column satisfies the predicate. A `None`
     /// predicate matches every row.
-    fn matching_row_ids(&self, pred: Option<&crate::parser::Predicate>) -> Result<Vec<u64>, DbError> {
+    fn matching_row_ids(
+        &self,
+        pred: Option<&crate::parser::Predicate>,
+    ) -> Result<Vec<u64>, DbError> {
         let mut out = Vec::new();
         let mut id = 0u64;
         while let Some(bytes) = self.tree.get(id) {
@@ -305,7 +308,11 @@ impl Database {
 
     // --- SELECT ------------------------------------------------------------
 
-    fn run_select(&self, stmt: &SelectStatement, params: &[Vec<f32>]) -> Result<executor::ResultSet, DbError> {
+    fn run_select(
+        &self,
+        stmt: &SelectStatement,
+        params: &[Vec<f32>],
+    ) -> Result<executor::ResultSet, DbError> {
         if let Some(ob) = &stmt.order_by_cosine {
             return self.run_vector_topk(stmt, ob, params);
         }
@@ -386,17 +393,19 @@ impl Database {
         })
     }
 
-    fn literal_to_value(&self, slot: usize, lit: &crate::parser::Literal) -> Result<Value, DbError> {
+    fn literal_to_value(
+        &self,
+        slot: usize,
+        lit: &crate::parser::Literal,
+    ) -> Result<Value, DbError> {
         let expected = &self.schema.types[slot];
         match (expected, lit) {
             (ColumnType::Int, crate::parser::Literal::Int(i)) => Ok(Value::Int(*i)),
             (ColumnType::Text, crate::parser::Literal::Text(t)) => Ok(Value::Text(t.clone())),
             (ColumnType::Vector, crate::parser::Literal::Vector(v)) => Ok(Value::Vector(v.clone())),
-            (ColumnType::Int, _)
-            | (ColumnType::Text, _)
-            | (ColumnType::Vector, _) => {
-                Err(DbError::ColumnTypeMismatch(self.schema.columns[slot].clone()))
-            }
+            (ColumnType::Int, _) | (ColumnType::Text, _) | (ColumnType::Vector, _) => Err(
+                DbError::ColumnTypeMismatch(self.schema.columns[slot].clone()),
+            ),
         }
     }
 }
@@ -437,15 +446,24 @@ mod tests {
         assert_eq!(r.rows.len(), 1);
         assert_eq!(r.rows[0][0], Value::Int(1));
 
-        d.execute(&parse_statement("UPDATE users SET age = 99 WHERE age < 50").unwrap(), &[])
-            .unwrap();
+        d.execute(
+            &parse_statement("UPDATE users SET age = 99 WHERE age < 50").unwrap(),
+            &[],
+        )
+        .unwrap();
         let r2 = d
-            .execute(&parse_statement("SELECT id FROM users WHERE age = 99").unwrap(), &[])
+            .execute(
+                &parse_statement("SELECT id FROM users WHERE age = 99").unwrap(),
+                &[],
+            )
             .unwrap();
         assert_eq!(r2.rows.len(), 1);
 
-        d.execute(&parse_statement("DELETE FROM users WHERE age = 99").unwrap(), &[])
-            .unwrap();
+        d.execute(
+            &parse_statement("DELETE FROM users WHERE age = 99").unwrap(),
+            &[],
+        )
+        .unwrap();
         assert_eq!(d.len(), 0);
     }
 
@@ -463,7 +481,8 @@ mod tests {
             Err(DbError::ArityMismatch)
         ));
 
-        let bad_ty = parse_statement("INSERT INTO users (id, name, age) VALUES (1, 5, 30)").unwrap();
+        let bad_ty =
+            parse_statement("INSERT INTO users (id, name, age) VALUES (1, 5, 30)").unwrap();
         assert_eq!(
             d.execute(&bad_ty, &[]),
             Err(DbError::ColumnTypeMismatch("name".to_string()))
