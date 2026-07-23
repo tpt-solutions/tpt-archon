@@ -196,7 +196,7 @@ Ordered de-risk-first; trust fixes are done, correctness/adoption tasks remain.
 - [x] `EXPLAIN` support in `relational` (`explain.rs`): `explain_plan` (always) renders the physical plan + dispatch; `explain_gpu` (gated on the `gpu` feature) prints the emitted TPTIR from `relational::gpu` for a GPU-dispatched scan — turns the emit-only GPU path into a demo-able feature.
 - [x] Capability-scoped multi-tenant demo (`crates/tpt-archon-bridge/examples/multi_tenant.rs`): two tenants share one unified page cache; per-tenant capabilities scope access, cross-tenant access denied, revocation enforced via issuer re-validation.
 - [x] `faultsim` test mode: randomly drop/corrupt/zero WAL tail bytes, assert `recover()` always yields a prefix-consistent state (`crates/tpt-archon-core/src/faultsim.rs`, `cargo test -p tpt-archon-core faultsim`).
-- [ ] `no_std` + `alloc`-only embedded CI target (compile-only, e.g. `cortex-m`) to prove the embeddable claim (needs a cross target/toolchain in CI; core is `no_std`-clean by construction but the target build is not wired into `ci.yml` yet).
+- [x] `no_std` + `alloc`-only embedded CI target (compile-only, e.g. `cortex-m`) to prove the embeddable claim (needs a cross target/toolchain in CI; core is `no_std`-clean by construction but the target build is not wired into `ci.yml` yet).
 - [x] `docs/GETTING_STARTED.md` + per-crate "What this crate is NOT (yet)" lines (ADR 0003 honesty) (`docs/GETTING_STARTED.md`).
 - [x] `cargo generate` template (`template/`) scaffolding a `Database::open` + INSERT/SELECT app — highest-leverage adoption move.
 

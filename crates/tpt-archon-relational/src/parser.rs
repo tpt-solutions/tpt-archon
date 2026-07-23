@@ -644,6 +644,15 @@ fn parse_primary_expr(lx: &mut Lexer) -> Result<Expr, ParseError> {
                     "unexpected keyword '{col}' in expression"
                 )));
             }
+            let mut col = col.to_string();
+            let peek = lx.next_tok()?;
+            if let Tok::Dot = peek {
+                let field = expect_ident(lx, "field name after '.'")?;
+                col = alloc::format!("{col}.{field}");
+            } else {
+                push_back(lx, peek);
+            }
+            let col: &str = &col;
             match lx.next_tok()? {
                 Tok::Ident(kw) if eq_ignore_case(kw, "is") => {
                     let negated = match lx.next_tok()? {
@@ -773,6 +782,40 @@ fn expect_tok(lx: &mut Lexer, expected: Tok, what: &str) -> Result<(), ParseErro
     }
 }
 
+/// Parse a table reference: either a plain name or `(SELECT ...) AS alias`.
+fn parse_table_ref(lx: &mut Lexer) -> Result<TableRef, ParseError> {
+    let tok = lx.next_tok()?;
+    match tok {
+        Tok::LParen => {
+            // Subquery: (SELECT ...) AS alias
+            // Consume the SELECT keyword before calling parse_select_inner.
+            match lx.next_tok()? {
+                Tok::Ident(kw) if eq_ignore_case(kw, "select") => {}
+                _ => return Err(ParseError("expected SELECT in subquery".to_string())),
+            }
+            let query = parse_select_inner(lx)?;
+            expect_tok(lx, Tok::RParen, "')' after subquery")?;
+            let alias = match lx.next_tok()? {
+                Tok::Ident(kw) if eq_ignore_case(kw, "as") => {
+                    expect_ident(lx, "subquery alias")?
+                }
+                t => {
+                    push_back(lx, t);
+                    return Err(ParseError(
+                        "subquery must have an AS alias".to_string(),
+                    ));
+                }
+            };
+            Ok(TableRef::Subquery {
+                query: Box::new(query),
+                alias,
+            })
+        }
+        Tok::Ident(name) => Ok(TableRef::Named(name.to_string())),
+        _ => Err(ParseError("expected table name or '('".to_string())),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Vector literal
 // ---------------------------------------------------------------------------
@@ -833,6 +876,9 @@ fn parse_create_view(lx: &mut Lexer) -> Result<CreateViewStatement, ParseError> 
     match lx.next_tok()? {
         Tok::Ident(kw) if eq_ignore_case(kw, "select") => {
             let query = parse_select_inner(lx)?;
+            if lx.next_tok()? != Tok::Eof {
+                return Err(ParseError("trailing tokens after statement".to_string()));
+            }
             Ok(CreateViewStatement { name, query })
         }
         _ => Err(ParseError(
@@ -1066,8 +1112,15 @@ fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
                             columns.push(col_name);
                         }
                     } else {
-                        // Regular column — check for alias: col AS name
-                        let next = lx.next_tok()?;
+                        // Regular column — allow a qualified name (`t.col`),
+                        // then check for alias: col AS name
+                        let mut col_name = col_name;
+                        let mut next = lx.next_tok()?;
+                        if let Tok::Dot = next {
+                            let field = expect_ident(lx, "field name after '.'")?;
+                            col_name = alloc::format!("{col_name}.{field}");
+                            next = lx.next_tok()?;
+                        }
                         if let Tok::Ident(kw) = &next {
                             if eq_ignore_case(kw, "as") {
                                 let alias = expect_ident(lx, "alias")?;
@@ -1098,7 +1151,7 @@ fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
         Tok::Ident(kw) if eq_ignore_case(kw, "from") => {}
         _ => return Err(ParseError("expected FROM".to_string())),
     }
-    let table = TableRef::Named(expect_ident(lx, "table name")?);
+    let table = parse_table_ref(lx)?;
 
     // Optional JOINs.
     let mut joins = Vec::new();
@@ -1106,14 +1159,14 @@ fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
         let t = lx.next_tok()?;
         if let Tok::Ident(kw) = &t {
             if eq_ignore_case(kw, "join") {
-                let join_table = expect_ident(lx, "join table name")?;
+                let join_table = parse_table_ref(lx)?;
                 expect_kw(lx, "on")?;
                 let left_col = expect_ident(lx, "left column")?;
                 expect_tok(lx, Tok::Op(CmpOp::Eq), "'=' in ON clause")?;
                 let right_col = expect_ident(lx, "right column")?;
                 joins.push(Join {
                     jtype: JoinType::Inner,
-                    table: TableRef::Named(join_table),
+                    table: join_table,
                     left_col,
                     right_col,
                 });
@@ -1250,9 +1303,10 @@ fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
         }
     }
 
-    if t != Tok::Eof {
-        return Err(ParseError("trailing tokens after statement".to_string()));
-    }
+    // Leave the terminating token (`Eof` for a top-level statement, `)` for a
+    // subquery) for the caller to check — this function is also invoked
+    // recursively for derived tables, where `Eof` is never reached.
+    push_back(lx, t);
 
     Ok(SelectStatement {
         columns,
@@ -1276,7 +1330,11 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
     let mut lx = Lexer::new(input);
     match lx.next_tok()? {
         Tok::Ident(kw) if eq_ignore_case(kw, "select") => {
-            parse_select_inner(&mut lx).map(Statement::Select)
+            let stmt = parse_select_inner(&mut lx)?;
+            if lx.next_tok()? != Tok::Eof {
+                return Err(ParseError("trailing tokens after statement".to_string()));
+            }
+            Ok(Statement::Select(stmt))
         }
         Tok::Ident(kw) if eq_ignore_case(kw, "insert") => parse_insert(lx).map(Statement::Insert),
         Tok::Ident(kw) if eq_ignore_case(kw, "update") => parse_update(lx).map(Statement::Update),
@@ -1319,7 +1377,13 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
 pub fn parse_select(input: &str) -> Result<SelectStatement, ParseError> {
     let mut lx = Lexer::new(input);
     match lx.next_tok()? {
-        Tok::Ident(kw) if eq_ignore_case(kw, "select") => parse_select_inner(&mut lx),
+        Tok::Ident(kw) if eq_ignore_case(kw, "select") => {
+            let stmt = parse_select_inner(&mut lx)?;
+            if lx.next_tok()? != Tok::Eof {
+                return Err(ParseError("trailing tokens after statement".to_string()));
+            }
+            Ok(stmt)
+        }
         _ => Err(ParseError("expected SELECT".to_string())),
     }
 }
@@ -1560,5 +1624,30 @@ mod tests {
                 _ => panic!("expected Cmp for op {src}"),
             }
         }
+    }
+
+    #[test]
+    fn parses_subquery_in_from() {
+        let s = parse_statement("SELECT * FROM (SELECT id, name FROM t WHERE age >= 20) AS sub")
+            .unwrap();
+        if let Statement::Select(sel) = s {
+            assert!(sel.star);
+            match &sel.table {
+                TableRef::Subquery { query, alias } => {
+                    assert_eq!(alias, "sub");
+                    assert_eq!(query.table, TableRef::Named("t".to_string()));
+                    assert!(query.filter.is_some());
+                }
+                _ => panic!("expected Subquery"),
+            }
+        } else {
+            panic!("expected Select");
+        }
+    }
+
+    #[test]
+    fn parses_subquery_without_alias_errors() {
+        let r = parse_statement("SELECT * FROM (SELECT id FROM t)");
+        assert!(r.is_err());
     }
 }

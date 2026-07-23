@@ -22,10 +22,15 @@
 //!   relational engine can lower a vectorized top-k scan into TPTIR text. This
 //!   crate is an *emitter*, not a runtime — we only assert the IR is produced,
 //!   never that it executes.
+//! * **`manifest`** — verifies every `.telos` source under `formal-proofs/`
+//!   has a `<name>.telos.proof.json` manifest whose recorded SHA-256 digest
+//!   matches the source file's current bytes, so CI fails on a missing or
+//!   tampered manifest rather than silently trusting a drifted `.telos` file.
 //!
 //! Per ADR 0003 these proofs/tests establish claims that are *tested now,
 //! proven later*; no zero-CVE / zero-corruption language is implied.
 
 pub mod eidos;
 pub mod gpu;
+pub mod manifest;
 pub mod telos;

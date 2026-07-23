@@ -1,0 +1,5 @@
+{
+  "source": "scheduler.telos",
+  "sha256": "10d7bfa706775b51d00db252e6f84068fc723aee57bd795c1215ccef7066f52e",
+  "proof_ids": ["scheduler_progress_is_deadlock_free"]
+}

@@ -708,8 +708,7 @@ impl Database {
 
     /// Resolves a [`TableRef`] to `(columns, rows)`: a view substitution (if
     /// `name` names a view), else a real table scan, for `Named`; a
-    /// derived-table substitution (once wired in a later phase) for
-    /// `Subquery`.
+    /// derived-table substitution (executing the inner query) for `Subquery`.
     fn resolve_table_ref(&self, r: &TableRef) -> Result<(Vec<String>, Vec<Vec<Value>>), DbError> {
         match r {
             TableRef::Named(name) => {
@@ -719,9 +718,15 @@ impl Database {
                 }
                 self.scan_table(name)
             }
-            TableRef::Subquery { .. } => Err(DbError::Unsupported(
-                "subqueries in FROM are not yet supported".to_string(),
-            )),
+            TableRef::Subquery { query, alias } => {
+                let rs = self.run_select(query, &[])?;
+                let columns: Vec<String> = rs
+                    .columns
+                    .iter()
+                    .map(|c| alloc::format!("{alias}.{c}"))
+                    .collect();
+                Ok((columns, rs.rows))
+            }
         }
     }
 
@@ -826,13 +831,39 @@ impl Database {
         ob: &OrderByCosine,
         params: &[Vec<f32>],
     ) -> Result<executor::ResultSet, DbError> {
+        let query = params.get(ob.param - 1).ok_or(DbError::MissingParam)?;
+
+        // For subqueries, resolve to an in-memory table first.
+        if let TableRef::Subquery { .. } = &stmt.table {
+            let (columns, rows) = self.resolve_table_ref(&stmt.table)?;
+            let slot = columns
+                .iter()
+                .position(|c| c == &ob.column)
+                .ok_or_else(|| DbError::UnknownColumn(ob.column.clone()))?;
+            let mut embeddings = Vec::new();
+            let mut data_rows = Vec::new();
+            for row in &rows {
+                if let Value::Vector(v) = &row[slot] {
+                    embeddings.push(v.clone());
+                    data_rows.push(row.clone());
+                }
+            }
+            let top = executor::vector_topk(&embeddings, query, ob.k as usize);
+            let out_rows: Vec<Vec<Value>> = top.into_iter().map(|i| data_rows[i].clone()).collect();
+            let out_columns = if stmt.star || stmt.columns.is_empty() {
+                columns
+            } else {
+                stmt.columns.clone()
+            };
+            return Ok(executor::ResultSet {
+                columns: out_columns,
+                rows: out_rows,
+            });
+        }
+
         let table_name = match &stmt.table {
             TableRef::Named(name) => name.as_str(),
-            TableRef::Subquery { .. } => {
-                return Err(DbError::Unsupported(
-                    "ORDER BY cosine(...) over a derived table is not yet supported".to_string(),
-                ))
-            }
+            TableRef::Subquery { .. } => unreachable!(),
         };
         let ts = self
             .table(table_name)
@@ -855,7 +886,6 @@ impl Database {
             }
             id += 1;
         }
-        let query = params.get(ob.param - 1).ok_or(DbError::MissingParam)?;
         let top = executor::vector_topk(&embeddings, query, ob.k as usize);
         let mut out_rows = Vec::new();
         for &i in &top {
@@ -1373,5 +1403,63 @@ mod tests {
             d.execute(&parse_statement("CREATE VIEW t AS SELECT * FROM t").unwrap(), &[]),
             Err(DbError::ViewAlreadyExists(_))
         ));
+    }
+
+    #[test]
+    fn subquery_in_from() {
+        let mut d = db();
+        for i in 0..5 {
+            let sql = alloc::format!("INSERT INTO t (id, name, age) VALUES ({i}, 'u{i}', {})", i * 10);
+            d.execute(&parse_statement(&sql).unwrap(), &[]).unwrap();
+        }
+        let r = d
+            .execute(
+                &parse_statement("SELECT * FROM (SELECT id, name FROM t WHERE age >= 20) AS sub")
+                    .unwrap(),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(r.rows.len(), 3);
+        assert_eq!(r.columns, alloc::vec!["id".to_string(), "name".to_string()]);
+    }
+
+    #[test]
+    fn subquery_with_alias_in_outer_where() {
+        let mut d = db();
+        for i in 0..5 {
+            let sql = alloc::format!("INSERT INTO t (id, name, age) VALUES ({i}, 'u{i}', {})", i * 10);
+            d.execute(&parse_statement(&sql).unwrap(), &[]).unwrap();
+        }
+        let r = d
+            .execute(
+                &parse_statement(
+                    "SELECT sub.id FROM (SELECT id, name, age FROM t WHERE age >= 10) AS sub WHERE sub.age < 30",
+                )
+                .unwrap(),
+                &[],
+            )
+            .unwrap();
+        // ages 10, 20 -> ids 1, 2
+        assert_eq!(r.rows.len(), 2);
+    }
+
+    #[test]
+    fn nested_subquery() {
+        let mut d = db();
+        for i in 0..5 {
+            let sql = alloc::format!("INSERT INTO t (id, name, age) VALUES ({i}, 'u{i}', {})", i * 10);
+            d.execute(&parse_statement(&sql).unwrap(), &[]).unwrap();
+        }
+        let r = d
+            .execute(
+                &parse_statement(
+                    "SELECT * FROM (SELECT * FROM (SELECT id, age FROM t WHERE age > 0) AS inner1) AS outer1",
+                )
+                .unwrap(),
+                &[],
+            )
+            .unwrap();
+        // ages 10, 20, 30, 40 -> 4 rows
+        assert_eq!(r.rows.len(), 4);
     }
 }
