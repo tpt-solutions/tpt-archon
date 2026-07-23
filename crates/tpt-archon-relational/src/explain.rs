@@ -96,6 +96,10 @@ fn render_node(node: &PlanNode, depth: usize, out: &mut String) {
             ));
             render_node(input, depth + 1, out);
         }
+        PlanNode::SubqueryScan { plan, alias } => {
+            out.push_str(&format!("{indent}SubqueryScan {{ alias: {alias} }}\n"));
+            render_node(&plan.root, depth + 1, out);
+        }
     }
 }
 

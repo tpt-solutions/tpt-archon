@@ -13,6 +13,9 @@
 //! BEGIN / COMMIT / ROLLBACK
 //! ```
 //!
+//! `<expr>` supports `AND`/`OR`/`NOT`, `IS [NOT] NULL`, `LIKE`, `IN`,
+//! `BETWEEN`, and comparisons against integer, text, or `NULL` literals.
+//!
 //! It uses a zero-copy tokenizer that borrows directly from the input string.
 //! PostgreSQL compatibility is the target dialect (spec Risk 2: PostgreSQL
 //! first, SQLite later); the grammar grows from here.
@@ -52,7 +55,7 @@ pub enum Literal {
 }
 
 /// A boolean expression tree used in `WHERE` clauses, `HAVING`, etc.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     /// A simple comparison: `column <op> value`.
     Cmp {
@@ -61,10 +64,15 @@ pub enum Expr {
         /// The comparison operator.
         op: CmpOp,
         /// The right-hand value.
-        value: i64,
+        value: Literal,
     },
-    /// `column IS NULL`.
-    IsNull(String),
+    /// `column IS [NOT] NULL`.
+    IsNull {
+        /// The column.
+        column: String,
+        /// `true` for `IS NOT NULL` / `!= NULL`.
+        negated: bool,
+    },
     /// `column LIKE pattern` (simple `%` and `_` wildcards).
     Like {
         /// The column to match.
@@ -92,6 +100,8 @@ pub enum Expr {
     And(Box<Expr>, Box<Expr>),
     /// `expr OR expr`.
     Or(Box<Expr>, Box<Expr>),
+    /// `NOT expr`.
+    Not(Box<Expr>),
 }
 
 /// A column reference with optional sort direction.
@@ -145,13 +155,39 @@ pub enum JoinType {
     Inner,
 }
 
+/// A reference to a table, view, CTE, or derived (subquery) source in a
+/// `FROM`/`JOIN` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableRef {
+    /// A plain table/view/CTE name.
+    Named(String),
+    /// A derived table: `(SELECT ...) AS alias`.
+    Subquery {
+        /// The subquery producing the derived table's rows.
+        query: Box<SelectStatement>,
+        /// The alias the derived table is referenced by.
+        alias: String,
+    },
+}
+
+impl TableRef {
+    /// The name this reference is known by (the table name, or the subquery's
+    /// alias) — used for display/estimation purposes.
+    pub fn name(&self) -> &str {
+        match self {
+            TableRef::Named(n) => n,
+            TableRef::Subquery { alias, .. } => alias,
+        }
+    }
+}
+
 /// A join clause: `JOIN <table> ON <left_col> = <right_col>`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Join {
     /// Join type.
     pub jtype: JoinType,
     /// The table to join with.
-    pub table: String,
+    pub table: TableRef,
     /// The column from the left table.
     pub left_col: String,
     /// The column from the right table.
@@ -159,14 +195,14 @@ pub struct Join {
 }
 
 /// A parsed `SELECT` statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SelectStatement {
     /// Projected columns; a single `*` becomes an empty vec meaning "all".
     pub columns: Vec<String>,
     /// Whether the projection was `*`.
     pub star: bool,
-    /// The source table name.
-    pub table: String,
+    /// The source table reference (table, view, CTE, or derived subquery).
+    pub table: TableRef,
     /// Optional `WHERE` expression tree.
     pub filter: Option<Expr>,
     /// Optional `JOIN` clauses.
@@ -226,7 +262,7 @@ pub struct UpdateStatement {
 }
 
 /// A parsed `DELETE FROM t [WHERE expr]` statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeleteStatement {
     /// Target table.
     pub table: String,
@@ -243,6 +279,15 @@ pub struct CreateTableStatement {
     pub columns: Vec<ColumnDef>,
 }
 
+/// A parsed `CREATE VIEW name AS <select>` statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateViewStatement {
+    /// The view name.
+    pub name: String,
+    /// The view's defining query.
+    pub query: SelectStatement,
+}
+
 /// A fully parsed statement: any of the supported DML/DQL/DDL forms.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -256,6 +301,10 @@ pub enum Statement {
     Delete(DeleteStatement),
     /// A `CREATE TABLE` statement.
     CreateTable(CreateTableStatement),
+    /// A `CREATE VIEW` statement.
+    CreateView(CreateViewStatement),
+    /// A `DROP VIEW name` statement.
+    DropView(String),
     /// A `BEGIN` transaction statement.
     Begin,
     /// A `COMMIT` transaction statement.
@@ -492,9 +541,12 @@ fn is_kw(s: &str) -> bool {
             | "join"
             | "on"
             | "create"
+            | "view"
+            | "drop"
             | "begin"
             | "commit"
             | "rollback"
+            | "not"
     )
 }
 
@@ -571,15 +623,8 @@ fn parse_and(lx: &mut Lexer) -> Result<Expr, ParseError> {
 fn parse_not(lx: &mut Lexer) -> Result<Expr, ParseError> {
     match lx.next_tok()? {
         Tok::Ident(kw) if eq_ignore_case(kw, "not") => {
-            let _inner = parse_primary_expr(lx)?;
-            // Represent NOT as an OR with a always-false branch — but that's
-            // wasteful. Instead, wrap in a dedicated variant if needed later.
-            // For now, NOT IS NULL → IsNotNull is handled at the primary level.
-            // We don't have a general NOT yet; return an error for unsupported
-            // NOT outside of IS NULL context.
-            Err(ParseError(
-                "NOT is not yet supported (use IS NULL / != instead)".to_string(),
-            ))
+            let inner = parse_not(lx)?;
+            Ok(Expr::Not(Box::new(inner)))
         }
         tok => {
             push_back(lx, tok);
@@ -601,8 +646,22 @@ fn parse_primary_expr(lx: &mut Lexer) -> Result<Expr, ParseError> {
             }
             match lx.next_tok()? {
                 Tok::Ident(kw) if eq_ignore_case(kw, "is") => {
-                    expect_kw(lx, "null")?;
-                    Ok(Expr::IsNull(col.to_string()))
+                    let negated = match lx.next_tok()? {
+                        Tok::Ident(kw) if eq_ignore_case(kw, "not") => {
+                            expect_kw(lx, "null")?;
+                            true
+                        }
+                        Tok::Ident(kw) if eq_ignore_case(kw, "null") => false,
+                        _ => {
+                            return Err(ParseError(
+                                "expected NULL or NOT NULL after IS".to_string(),
+                            ))
+                        }
+                    };
+                    Ok(Expr::IsNull {
+                        column: col.to_string(),
+                        negated,
+                    })
                 }
                 Tok::Ident(kw) if eq_ignore_case(kw, "like") => {
                     let pattern = match lx.next_tok()? {
@@ -652,22 +711,17 @@ fn parse_primary_expr(lx: &mut Lexer) -> Result<Expr, ParseError> {
                     // Check for NULL on the right side.
                     match lx.next_tok()? {
                         Tok::Ident(kw) if eq_ignore_case(kw, "null") => {
-                            // col <op> NULL → handle specially.
-                            // Only col IS NULL / col IS NOT NULL are valid SQL,
-                            // but some engines allow col = NULL (always false).
-                            // We'll treat it as a special case.
+                            // `col = NULL` / `col != NULL` are non-standard but
+                            // commonly accepted shorthand for IS [NOT] NULL.
                             match op {
-                                CmpOp::Eq => {
-                                    // Always false in SQL; represent as a dummy
-                                    // expression that never matches.
-                                    // For simplicity, return a false constant
-                                    // via an impossible predicate.
-                                    Ok(Expr::IsNull(col.to_string())) // Misuse; TODO
-                                }
-                                CmpOp::Ne => Ok(Expr::And(
-                                    Box::new(Expr::IsNull(col.to_string())),
-                                    Box::new(Expr::IsNull(col.to_string())),
-                                )),
+                                CmpOp::Eq => Ok(Expr::IsNull {
+                                    column: col.to_string(),
+                                    negated: false,
+                                }),
+                                CmpOp::Ne => Ok(Expr::IsNull {
+                                    column: col.to_string(),
+                                    negated: true,
+                                }),
                                 _ => Err(ParseError(
                                     "comparison with NULL requires IS / IS NOT".to_string(),
                                 )),
@@ -676,7 +730,12 @@ fn parse_primary_expr(lx: &mut Lexer) -> Result<Expr, ParseError> {
                         Tok::Int(v) => Ok(Expr::Cmp {
                             column: col.to_string(),
                             op,
-                            value: v,
+                            value: Literal::Int(v),
+                        }),
+                        Tok::Text(s) => Ok(Expr::Cmp {
+                            column: col.to_string(),
+                            op,
+                            value: Literal::Text(s.to_string()),
                         }),
                         _ => Err(ParseError("expected value after operator".to_string())),
                     }
@@ -761,6 +820,24 @@ fn parse_literal(lx: &mut Lexer) -> Result<Literal, ParseError> {
         Tok::LBracket => parse_vector_literal(lx),
         Tok::Ident(kw) if eq_ignore_case(kw, "null") => Ok(Literal::Null),
         _ => Err(ParseError("expected a value".to_string())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CREATE VIEW
+// ---------------------------------------------------------------------------
+
+fn parse_create_view(lx: &mut Lexer) -> Result<CreateViewStatement, ParseError> {
+    let name = expect_ident(lx, "view name")?;
+    expect_kw(lx, "as")?;
+    match lx.next_tok()? {
+        Tok::Ident(kw) if eq_ignore_case(kw, "select") => {
+            let query = parse_select_inner(lx)?;
+            Ok(CreateViewStatement { name, query })
+        }
+        _ => Err(ParseError(
+            "expected SELECT after CREATE VIEW ... AS".to_string(),
+        )),
     }
 }
 
@@ -1021,7 +1098,7 @@ fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
         Tok::Ident(kw) if eq_ignore_case(kw, "from") => {}
         _ => return Err(ParseError("expected FROM".to_string())),
     }
-    let table = expect_ident(lx, "table name")?;
+    let table = TableRef::Named(expect_ident(lx, "table name")?);
 
     // Optional JOINs.
     let mut joins = Vec::new();
@@ -1036,7 +1113,7 @@ fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
                 let right_col = expect_ident(lx, "right column")?;
                 joins.push(Join {
                     jtype: JoinType::Inner,
-                    table: join_table,
+                    table: TableRef::Named(join_table),
                     left_col,
                     right_col,
                 });
@@ -1205,13 +1282,34 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
         Tok::Ident(kw) if eq_ignore_case(kw, "update") => parse_update(lx).map(Statement::Update),
         Tok::Ident(kw) if eq_ignore_case(kw, "delete") => parse_delete(lx).map(Statement::Delete),
         Tok::Ident(kw) if eq_ignore_case(kw, "create") => {
-            parse_create_table(&mut lx).map(Statement::CreateTable)
+            let sub = lx.next_tok()?;
+            match &sub {
+                Tok::Ident(s) if eq_ignore_case(s, "table") => {
+                    push_back(&mut lx, sub);
+                    parse_create_table(&mut lx).map(Statement::CreateTable)
+                }
+                Tok::Ident(s) if eq_ignore_case(s, "view") => {
+                    parse_create_view(&mut lx).map(Statement::CreateView)
+                }
+                _ => Err(ParseError("expected TABLE or VIEW after CREATE".to_string())),
+            }
         }
+        Tok::Ident(kw) if eq_ignore_case(kw, "drop") => match lx.next_tok()? {
+            Tok::Ident(s) if eq_ignore_case(s, "view") => {
+                let name = expect_ident(&mut lx, "view name")?;
+                if lx.next_tok()? != Tok::Eof {
+                    return Err(ParseError("trailing tokens after statement".to_string()));
+                }
+                Ok(Statement::DropView(name))
+            }
+            _ => Err(ParseError("expected VIEW after DROP".to_string())),
+        },
         Tok::Ident(kw) if eq_ignore_case(kw, "begin") => Ok(Statement::Begin),
         Tok::Ident(kw) if eq_ignore_case(kw, "commit") => Ok(Statement::Commit),
         Tok::Ident(kw) if eq_ignore_case(kw, "rollback") => Ok(Statement::Rollback),
         _ => Err(ParseError(
-            "expected SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, BEGIN, COMMIT, or ROLLBACK"
+            "expected SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, CREATE VIEW, DROP VIEW, \
+             BEGIN, COMMIT, or ROLLBACK"
                 .to_string(),
         )),
     }
@@ -1238,7 +1336,7 @@ mod tests {
     fn parses_star_select() {
         let s = parse_select("SELECT * FROM users").unwrap();
         assert!(s.star);
-        assert_eq!(s.table, "users");
+        assert_eq!(s.table, TableRef::Named("users".to_string()));
         assert!(s.filter.is_none());
         assert!(s.limit.is_none());
     }
@@ -1248,7 +1346,7 @@ mod tests {
         let s = parse_select("SELECT id, name FROM t WHERE age >= 18 LIMIT 5").unwrap();
         assert!(!s.star);
         assert_eq!(s.columns, alloc::vec!["id".to_string(), "name".to_string()]);
-        assert_eq!(s.table, "t");
+        assert_eq!(s.table, TableRef::Named("t".to_string()));
         assert!(s.filter.is_some());
         assert_eq!(s.limit, Some(5));
     }
@@ -1264,7 +1362,72 @@ mod tests {
     #[test]
     fn parses_is_null() {
         let s = parse_select("SELECT * FROM t WHERE x IS NULL").unwrap();
-        assert!(matches!(s.filter, Some(Expr::IsNull(c)) if c == "x"));
+        assert!(matches!(
+            s.filter,
+            Some(Expr::IsNull { ref column, negated: false }) if column == "x"
+        ));
+    }
+
+    #[test]
+    fn parses_is_not_null() {
+        let s = parse_select("SELECT * FROM t WHERE x IS NOT NULL").unwrap();
+        assert!(matches!(
+            s.filter,
+            Some(Expr::IsNull { ref column, negated: true }) if column == "x"
+        ));
+    }
+
+    #[test]
+    fn parses_not_equals_null_as_is_not_null() {
+        let s = parse_select("SELECT * FROM t WHERE x != NULL").unwrap();
+        assert!(matches!(
+            s.filter,
+            Some(Expr::IsNull { ref column, negated: true }) if column == "x"
+        ));
+    }
+
+    #[test]
+    fn parses_equals_null_as_is_null() {
+        let s = parse_select("SELECT * FROM t WHERE x = NULL").unwrap();
+        assert!(matches!(
+            s.filter,
+            Some(Expr::IsNull { ref column, negated: false }) if column == "x"
+        ));
+    }
+
+    #[test]
+    fn parses_not_prefix() {
+        let s = parse_select("SELECT * FROM t WHERE NOT x IS NULL").unwrap();
+        assert!(matches!(s.filter, Some(Expr::Not(_))));
+    }
+
+    #[test]
+    fn parses_text_comparison() {
+        let s = parse_select("SELECT * FROM t WHERE name = 'bob'").unwrap();
+        assert!(matches!(
+            s.filter,
+            Some(Expr::Cmp { ref column, value: Literal::Text(ref v), .. })
+                if column == "name" && v == "bob"
+        ));
+    }
+
+    #[test]
+    fn parses_create_view() {
+        let s = parse_statement("CREATE VIEW adults AS SELECT * FROM t WHERE age >= 18").unwrap();
+        match s {
+            Statement::CreateView(cv) => {
+                assert_eq!(cv.name, "adults");
+                assert_eq!(cv.query.table, TableRef::Named("t".to_string()));
+                assert!(cv.query.filter.is_some());
+            }
+            _ => panic!("expected CreateView"),
+        }
+    }
+
+    #[test]
+    fn parses_drop_view() {
+        let s = parse_statement("DROP VIEW adults").unwrap();
+        assert!(matches!(s, Statement::DropView(name) if name == "adults"));
     }
 
     #[test]
@@ -1322,7 +1485,7 @@ mod tests {
     fn parses_join() {
         let s = parse_select("SELECT * FROM t1 JOIN t2 ON t1.id = t2.t1_id").unwrap();
         assert_eq!(s.joins.len(), 1);
-        assert_eq!(s.joins[0].table, "t2");
+        assert_eq!(s.joins[0].table, TableRef::Named("t2".to_string()));
         assert_eq!(s.joins[0].left_col, "t1.id");
         assert_eq!(s.joins[0].right_col, "t2.t1_id");
     }

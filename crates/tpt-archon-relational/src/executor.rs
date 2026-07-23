@@ -9,13 +9,13 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::parser::{AggregateFunc, CmpOp, Expr};
+use crate::parser::{AggregateFunc, CmpOp, Expr, Literal};
 use crate::planner::{Plan, PlanNode};
 
 /// Rows processed per vectorized batch.
 pub const BATCH_SIZE: usize = 1024;
 
-/// A single value in a row (integers, text, or an embedding vector).
+/// A single value in a row (integers, text, an embedding vector, or NULL).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// A 64-bit integer.
@@ -24,6 +24,8 @@ pub enum Value {
     Text(String),
     /// A fixed-width `f32` embedding vector (the `f32[]` column type).
     Vector(Vec<f32>),
+    /// SQL `NULL`.
+    Null,
 }
 
 impl Eq for Value {}
@@ -49,7 +51,10 @@ impl Ord for Value {
                         .unwrap_or(core::cmp::Ordering::Equal)
                 })
             }
-            // Cross-variant ordering: Int < Text < Vector.
+            // Cross-variant ordering: Int < Text < Vector < Null (NULL sorts last).
+            (Value::Null, Value::Null) => core::cmp::Ordering::Equal,
+            (Value::Null, _) => core::cmp::Ordering::Greater,
+            (_, Value::Null) => core::cmp::Ordering::Less,
             (Value::Int(_), _) => core::cmp::Ordering::Less,
             (_, Value::Int(_)) => core::cmp::Ordering::Greater,
             (Value::Text(_), _) => core::cmp::Ordering::Less,
@@ -117,19 +122,21 @@ pub fn eval_expr(expr: &Expr, columns: &[String], row: &[Value]) -> Result<bool,
                 .iter()
                 .position(|c| c == column)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
-            match &row[idx] {
-                Value::Int(v) => Ok(eval_cmp(*op, *v, *value)),
-                Value::Text(t) => Ok(eval_text_cmp(*op, t, *value)),
-                Value::Vector(_) => Err(ExecError::TypeMismatch),
+            match (&row[idx], value) {
+                (Value::Null, _) => Ok(false),
+                (_, Literal::Null) => Ok(false),
+                (Value::Int(v), Literal::Int(rhs)) => Ok(eval_cmp(*op, *v, *rhs)),
+                (Value::Text(v), Literal::Text(rhs)) => Ok(eval_text_cmp(*op, v, rhs)),
+                _ => Err(ExecError::TypeMismatch),
             }
         }
-        Expr::IsNull(column) => {
+        Expr::IsNull { column, negated } => {
             let idx = columns
                 .iter()
                 .position(|c| c == column)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
-            Ok(matches!(&row[idx], Value::Text(t) if t.is_empty())
-                || matches!(&row[idx], Value::Int(_)))
+            let is_null = matches!(&row[idx], Value::Null);
+            Ok(is_null != *negated)
         }
         Expr::Like { column, pattern } => {
             let idx = columns
@@ -163,10 +170,11 @@ pub fn eval_expr(expr: &Expr, columns: &[String], row: &[Value]) -> Result<bool,
         }
         Expr::And(l, r) => Ok(eval_expr(l, columns, row)? && eval_expr(r, columns, row)?),
         Expr::Or(l, r) => Ok(eval_expr(l, columns, row)? || eval_expr(r, columns, row)?),
+        Expr::Not(inner) => Ok(!eval_expr(inner, columns, row)?),
     }
 }
 
-fn eval_cmp(op: CmpOp, lhs: i64, rhs: i64) -> bool {
+fn eval_cmp<T: PartialOrd>(op: CmpOp, lhs: T, rhs: T) -> bool {
     match op {
         CmpOp::Eq => lhs == rhs,
         CmpOp::Ne => lhs != rhs,
@@ -177,12 +185,9 @@ fn eval_cmp(op: CmpOp, lhs: i64, rhs: i64) -> bool {
     }
 }
 
-/// Evaluate a text comparison (lexicographic).
-fn eval_text_cmp(op: CmpOp, lhs: &str, rhs: i64) -> bool {
-    // Compare text as its length against the integer — a simplification.
-    // For richer text comparisons, extend Literal to support Text on the RHS.
-    let len = lhs.len() as i64;
-    eval_cmp(op, len, rhs)
+/// Evaluate a text comparison by comparing the actual string content.
+fn eval_text_cmp(op: CmpOp, lhs: &str, rhs: &str) -> bool {
+    eval_cmp(op, lhs, rhs)
 }
 
 /// Simple SQL `LIKE` matching: `%` matches any sequence, `_` matches one char.
@@ -222,6 +227,67 @@ fn like_recurse(text: &[u8], pat: &[u8]) -> bool {
 // ---------------------------------------------------------------------------
 // Aggregate evaluation
 // ---------------------------------------------------------------------------
+
+/// Runs `GROUP BY` + aggregate projection over an in-memory `(columns, rows)`
+/// table, producing the aggregated result. Shared by the executor's own
+/// [`PlanNode::Aggregate`] and [`Database::run_select`](crate::database::Database::run_select)'s
+/// pre-planner aggregate step so the two paths don't duplicate this logic.
+pub fn aggregate_table(
+    columns: &[String],
+    rows: &[Row],
+    group_by: &[String],
+    aggregates: &[(String, AggregateFunc, String)],
+) -> Result<ResultSet, ExecError> {
+    if group_by.is_empty() {
+        let mut out_row = Vec::new();
+        let mut out_cols = Vec::new();
+        for (alias, func, col) in aggregates {
+            out_row.push(eval_aggregate(*func, col, columns, rows)?);
+            out_cols.push(alias.clone());
+        }
+        return Ok(ResultSet {
+            columns: out_cols,
+            rows: alloc::vec![out_row],
+        });
+    }
+
+    let gb_indices: Vec<usize> = group_by
+        .iter()
+        .map(|c| {
+            columns
+                .iter()
+                .position(|ic| ic == c)
+                .ok_or_else(|| ExecError::UnknownColumn(c.clone()))
+        })
+        .collect::<Result<_, _>>()?;
+
+    let mut groups: alloc::collections::BTreeMap<Vec<Value>, Vec<Row>> =
+        alloc::collections::BTreeMap::new();
+    for row in rows {
+        let key: Vec<Value> = gb_indices.iter().map(|&i| row[i].clone()).collect();
+        groups.entry(key).or_default().push(row.clone());
+    }
+
+    let mut out_cols = group_by.to_vec();
+    for (alias, _, _) in aggregates {
+        out_cols.push(alias.clone());
+    }
+    let mut out_rows = Vec::new();
+    for group_rows in groups.values() {
+        let mut out_row = Vec::new();
+        for &idx in &gb_indices {
+            out_row.push(group_rows[0][idx].clone());
+        }
+        for (_alias, func, col) in aggregates {
+            out_row.push(eval_aggregate(*func, col, columns, group_rows)?);
+        }
+        out_rows.push(out_row);
+    }
+    Ok(ResultSet {
+        columns: out_cols,
+        rows: out_rows,
+    })
+}
 
 fn eval_aggregate(
     func: AggregateFunc,
@@ -376,11 +442,7 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
                 .collect();
             inner.rows.sort_by(|a, b| {
                 for &(idx, desc) in &sort_indices {
-                    let ord = match (&a[idx], &b[idx]) {
-                        (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                        (Value::Text(x), Value::Text(y)) => x.cmp(y),
-                        _ => core::cmp::Ordering::Equal,
-                    };
+                    let ord = a[idx].cmp(&b[idx]);
                     let ord = if desc { ord.reverse() } else { ord };
                     if ord != core::cmp::Ordering::Equal {
                         return ord;
@@ -396,52 +458,19 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
             input,
         } => {
             let inner = execute_node(input, table)?;
-            if group_by.is_empty() {
-                // Scalar aggregate: one output row.
-                let mut out_row = Vec::new();
-                let mut out_cols = Vec::new();
-                for (alias, func, col) in aggregates {
-                    out_row.push(eval_aggregate(*func, col, &inner.columns, &inner.rows)?);
-                    out_cols.push(alias.clone());
-                }
-                Ok(ResultSet {
-                    columns: out_cols,
-                    rows: alloc::vec![out_row],
-                })
-            } else {
-                // Group-by aggregate: partition rows by group-by columns.
-                let gb_indices: Vec<usize> = group_by
-                    .iter()
-                    .map(|c| inner.columns.iter().position(|ic| ic == c).unwrap_or(0))
-                    .collect();
-                // Build groups.
-                let mut groups: alloc::collections::BTreeMap<Vec<Value>, Vec<Row>> =
-                    alloc::collections::BTreeMap::new();
-                for row in &inner.rows {
-                    let key: Vec<Value> = gb_indices.iter().map(|&i| row[i].clone()).collect();
-                    groups.entry(key).or_default().push(row.clone());
-                }
-                // Build output.
-                let mut out_cols = group_by.clone();
-                for (alias, _, _) in aggregates {
-                    out_cols.push(alias.clone());
-                }
-                let mut out_rows = Vec::new();
-                for group_rows in groups.values() {
-                    let mut out_row = Vec::new();
-                    for &idx in &gb_indices {
-                        out_row.push(group_rows[0][idx].clone());
-                    }
-                    for (_alias, func, col) in aggregates {
-                        out_row.push(eval_aggregate(*func, col, &inner.columns, group_rows)?);
-                    }
-                    out_rows.push(out_row);
-                }
-                Ok(ResultSet {
-                    columns: out_cols,
-                    rows: out_rows,
-                })
-            }
+            aggregate_table(&inner.columns, &inner.rows, group_by, aggregates)
+        }
+        PlanNode::SubqueryScan { plan, alias } => {
+            let inner = execute(plan, table)?;
+            let columns = inner
+                .columns
+                .iter()
+                .map(|c| alloc::format!("{alias}.{c}"))
+                .collect();
+            Ok(ResultSet {
+                columns,
+                rows: inner.rows,
+            })
         }
     }
 }
@@ -618,5 +647,49 @@ mod tests {
         }
         let r = run("SELECT SUM(x) FROM t", &t);
         assert_eq!(r.rows[0][0], Value::Int(10));
+    }
+
+    #[test]
+    fn text_comparison_compares_content_not_length() {
+        // Regression test: `eval_text_cmp` used to compare `lhs.len()` against
+        // the RHS integer instead of the actual string content.
+        let mut t = Table::new(alloc::vec!["id".to_string(), "name".to_string()]);
+        t.insert(alloc::vec![Value::Int(0), Value::Text("bob".to_string())]);
+        t.insert(alloc::vec![Value::Int(1), Value::Text("amy".to_string())]);
+        let r = run("SELECT id FROM t WHERE name = 'bob'", &t);
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], Value::Int(0));
+    }
+
+    #[test]
+    fn is_null_is_false_for_non_null_int() {
+        // Regression test: `IS NULL` used to always evaluate true for any Int
+        // column regardless of value.
+        let mut t = Table::new(alloc::vec!["id".to_string(), "x".to_string()]);
+        t.insert(alloc::vec![Value::Int(0), Value::Int(5)]);
+        t.insert(alloc::vec![Value::Int(1), Value::Null]);
+        let r = run("SELECT id FROM t WHERE x IS NULL", &t);
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], Value::Int(1));
+    }
+
+    #[test]
+    fn is_not_null_negates() {
+        let mut t = Table::new(alloc::vec!["id".to_string(), "x".to_string()]);
+        t.insert(alloc::vec![Value::Int(0), Value::Int(5)]);
+        t.insert(alloc::vec![Value::Int(1), Value::Null]);
+        let r = run("SELECT id FROM t WHERE x IS NOT NULL", &t);
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], Value::Int(0));
+    }
+
+    #[test]
+    fn not_negates_expression() {
+        let mut t = Table::new(alloc::vec!["id".to_string(), "x".to_string()]);
+        for i in 0..5 {
+            t.insert(alloc::vec![Value::Int(i), Value::Int(i)]);
+        }
+        let r = run("SELECT id FROM t WHERE NOT x > 2", &t);
+        assert_eq!(r.rows.len(), 3);
     }
 }

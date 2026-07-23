@@ -34,7 +34,7 @@ pub enum Dispatch {
 }
 
 /// A physical plan node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode {
     /// Full scan of a table.
     Scan {
@@ -82,10 +82,19 @@ pub enum PlanNode {
         /// Input node.
         input: Box<PlanNode>,
     },
+    /// A nested query executed as a scannable source — the shared primitive
+    /// views, subqueries-in-`FROM`, and CTE materialization build on. Not yet
+    /// emitted by [`plan_select`]; wired up by later phases.
+    SubqueryScan {
+        /// The nested plan to execute.
+        plan: Box<Plan>,
+        /// The alias this nested result is referenced by.
+        alias: String,
+    },
 }
 
 /// A plan plus its estimated cost and dispatch decision.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     /// The root plan node.
     pub root: PlanNode,
@@ -113,7 +122,8 @@ fn selectivity(expr: &Expr) -> (u64, u64) {
             ..
         } => (9, 10),
         Expr::Cmp { .. } => (1, 3),
-        Expr::IsNull(_) => (1, 20),
+        Expr::IsNull { negated: false, .. } => (1, 20),
+        Expr::IsNull { negated: true, .. } => (19, 20),
         Expr::Like { .. } => (1, 5),
         Expr::InInt { values, .. } => {
             let n = values.len().max(1) as u64;
@@ -138,6 +148,11 @@ fn selectivity(expr: &Expr) -> (u64, u64) {
                 (num.max(1), den)
             }
         }
+        Expr::Not(inner) => {
+            let (a, b) = selectivity(inner);
+            // P(NOT x) = 1 - P(x).
+            (b.saturating_sub(a).max(1), b)
+        }
     }
 }
 
@@ -145,7 +160,7 @@ fn selectivity(expr: &Expr) -> (u64, u64) {
 pub fn plan_select(stmt: &SelectStatement, stats: TableStats) -> Plan {
     let vectorized = stats.row_count >= VECTORIZE_ROW_THRESHOLD;
     let mut node = PlanNode::Scan {
-        table: stmt.table.clone(),
+        table: stmt.table.name().to_string(),
         vectorized,
     };
 
@@ -273,6 +288,17 @@ mod tests {
         let stmt = parse_select("SELECT dept, COUNT(*) FROM t GROUP BY dept").unwrap();
         let plan = plan_select(&stmt, TableStats { row_count: 100 });
         assert!(matches!(plan.root, PlanNode::Project { .. }));
+    }
+
+    #[test]
+    fn subquery_scan_node_round_trips() {
+        let stmt = parse_select("SELECT id FROM t").unwrap();
+        let inner_plan = plan_select(&stmt, TableStats { row_count: 5 });
+        let node = PlanNode::SubqueryScan {
+            plan: alloc::boxed::Box::new(inner_plan),
+            alias: "sub".to_string(),
+        };
+        assert!(matches!(node, PlanNode::SubqueryScan { .. }));
     }
 
     #[test]

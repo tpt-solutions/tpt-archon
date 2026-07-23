@@ -139,6 +139,7 @@ fn display_value(val: &Value) -> String {
             let inner: Vec<String> = v.iter().map(|f| format!("{:.4}", f)).collect();
             format!("[{}]", inner.join(", "))
         }
+        Value::Null => "NULL".to_string(),
     }
 }
 
@@ -155,6 +156,10 @@ fn fmt_db_error(e: &DbError) -> String {
         DbError::UnknownTable(t) => format!("unknown table '{t}'"),
         DbError::TransactionError(m) => format!("transaction error: {m}"),
         DbError::TableAlreadyExists(t) => format!("table '{t}' already exists"),
+        DbError::ViewAlreadyExists(v) => format!("view '{v}' already exists"),
+        DbError::UnknownView(v) => format!("unknown view '{v}'"),
+        DbError::RecursiveView(v) => format!("view '{v}' cannot reference itself"),
+        DbError::Unsupported(m) => format!("unsupported: {m}"),
         DbError::Exec(e) => format!("execution error: {e:?}"),
     }
 }

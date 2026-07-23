@@ -17,11 +17,17 @@ use alloc::vec::Vec;
 use tpt_archon_core::btree::BTree;
 
 use crate::executor::{self, Value};
+use crate::mvcc;
 use crate::parser::{
-    AggregateFunc, CreateTableStatement, DeleteStatement, Expr, InsertStatement, OrderByCosine,
-    SelectStatement, Statement, UpdateStatement,
+    CreateTableStatement, CreateViewStatement, DeleteStatement, Expr, InsertStatement,
+    OrderByCosine, SelectStatement, Statement, TableRef, UpdateStatement,
 };
 use crate::planner::{plan_select, TableStats};
+
+/// MVCC-buffered-write status tag: the row bytes that follow are live.
+const MVCC_LIVE: u8 = 0;
+/// MVCC-buffered-write status tag: the row was deleted within the transaction.
+const MVCC_TOMBSTONE: u8 = 1;
 
 /// A column's logical type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +81,14 @@ pub enum DbError {
     TransactionError(String),
     /// Table already exists (CREATE TABLE).
     TableAlreadyExists(String),
+    /// A view (or table) with this name already exists (CREATE VIEW).
+    ViewAlreadyExists(String),
+    /// Referenced view does not exist (DROP VIEW).
+    UnknownView(String),
+    /// A view's defining query references its own not-yet-existing name.
+    RecursiveView(String),
+    /// A parsed feature is recognized but not yet supported by this engine.
+    Unsupported(String),
     /// Execution error propagated from the executor.
     Exec(executor::ExecError),
 }
@@ -89,24 +103,43 @@ impl From<executor::ExecError> for DbError {
     }
 }
 
-/// A table's storage: its schema and B-Link tree.
+/// A table's storage: its schema, B-Link tree, and per-table MVCC store used
+/// while a transaction is open on it.
 #[derive(Debug)]
 struct TableStorage {
     schema: Schema,
     tree: BTree,
     next_row_id: u64,
+    mvcc: mvcc::MvccStore,
 }
 
 /// A small relational database backed by `tpt-archon-core`'s B-Link tree.
 ///
 /// Supports multiple tables, SQL DDL (`CREATE TABLE`), multi-predicate
 /// `WHERE`, `JOIN`s, `GROUP BY` + aggregates, `ORDER BY`, and
-/// `BEGIN`/`COMMIT`/`ROLLBACK` transaction control.
+/// `BEGIN`/`COMMIT`/`ROLLBACK` transaction control backed by [`mvcc`].
+///
+/// Each table keeps its own [`mvcc::MvccStore`]; an open transaction lazily
+/// begins a per-table [`mvcc::Transaction`] the first time that table is
+/// touched. Writes made while a transaction is open are buffered in that
+/// table's store (not applied to the B-Link tree) so `ROLLBACK` can discard
+/// them outright; `COMMIT` validates and applies each table's buffered writes
+/// in turn. Because each table commits independently, a conflict on one
+/// table during `COMMIT` does not roll back writes already applied to
+/// tables committed earlier in the same `COMMIT` — cross-table commit is not
+/// atomic. This is a known limitation, not a subtle bug: true multi-table
+/// atomicity would need a two-phase commit protocol this engine doesn't have.
 #[derive(Debug)]
 pub struct Database {
     tables: Vec<(String, TableStorage)>,
+    /// View definitions: name -> defining query. Views have no storage of
+    /// their own; `FROM <view>` expands to running the defining query.
+    views: Vec<(String, SelectStatement)>,
     /// Whether we are inside an open transaction (BEGIN without COMMIT/ROLLBACK).
     in_transaction: bool,
+    /// Per-table transactions, lazily begun on first touch within the
+    /// currently open transaction (empty when `!in_transaction`).
+    active_txns: Vec<(String, mvcc::Transaction)>,
 }
 
 impl Database {
@@ -120,6 +153,7 @@ impl Database {
                 schema,
                 tree: BTree::new(),
                 next_row_id: 0,
+                mvcc: mvcc::MvccStore::new(),
             },
         ));
         db
@@ -129,8 +163,34 @@ impl Database {
     pub fn empty() -> Self {
         Self {
             tables: Vec::new(),
+            views: Vec::new(),
             in_transaction: false,
+            active_txns: Vec::new(),
         }
+    }
+
+    /// Ensures a per-table transaction exists for `table_name` while an outer
+    /// `BEGIN` is open, lazily beginning one on first touch.
+    fn ensure_txn(&mut self, table_name: &str) {
+        if self.active_txns.iter().any(|(n, _)| n == table_name) {
+            return;
+        }
+        if let Some(ts) = self.table(table_name) {
+            let txn = ts.mvcc.begin();
+            self.active_txns.push((table_name.to_string(), txn));
+        }
+    }
+
+    /// Wraps encoded row bytes with the MVCC live-row status tag.
+    fn mvcc_wrap_row(values: &[Value]) -> Vec<u8> {
+        let mut out = vec![MVCC_LIVE];
+        out.extend_from_slice(&Self::encode_row(values));
+        out
+    }
+
+    /// The MVCC tombstone marker for a row deleted within a transaction.
+    fn mvcc_wrap_tombstone() -> Vec<u8> {
+        vec![MVCC_TOMBSTONE]
     }
 
     /// Looks up a table by name.
@@ -190,6 +250,14 @@ impl Database {
                 self.run_create_table(ct)?;
                 Ok(empty_result_set())
             }
+            Statement::CreateView(cv) => {
+                self.run_create_view(cv)?;
+                Ok(empty_result_set())
+            }
+            Statement::DropView(name) => {
+                self.run_drop_view(name)?;
+                Ok(empty_result_set())
+            }
             Statement::Begin => {
                 if self.in_transaction {
                     return Err(DbError::TransactionError(
@@ -197,6 +265,7 @@ impl Database {
                     ));
                 }
                 self.in_transaction = true;
+                self.active_txns.clear();
                 Ok(empty_result_set())
             }
             Statement::Commit => {
@@ -205,7 +274,31 @@ impl Database {
                         "no active transaction".to_string(),
                     ));
                 }
+                let txns = core::mem::take(&mut self.active_txns);
                 self.in_transaction = false;
+                for (table_name, txn) in txns {
+                    let writes: Vec<(u64, Vec<u8>)> =
+                        txn.writes_iter().map(|(k, v)| (k, v.to_vec())).collect();
+                    let ts = self
+                        .table_mut(&table_name)
+                        .expect("table existed when its transaction was opened");
+                    match ts.mvcc.commit(txn) {
+                        Ok(_) => {
+                            for (id, bytes) in writes {
+                                if bytes[0] == MVCC_TOMBSTONE {
+                                    ts.tree.delete(id);
+                                } else {
+                                    ts.tree.insert(id, bytes[1..].to_vec());
+                                }
+                            }
+                        }
+                        Err(mvcc::CommitError::Conflict) => {
+                            return Err(DbError::TransactionError(alloc::format!(
+                                "commit conflict on table '{table_name}'"
+                            )));
+                        }
+                    }
+                }
                 Ok(empty_result_set())
             }
             Statement::Rollback => {
@@ -214,8 +307,9 @@ impl Database {
                         "no active transaction".to_string(),
                     ));
                 }
-                // In this single-writer model, rollback is a no-op
-                // (buffered writes would need MVCC integration).
+                // Buffered per-table transactions are simply dropped without
+                // committing, discarding every write made since BEGIN.
+                self.active_txns.clear();
                 self.in_transaction = false;
                 Ok(empty_result_set())
             }
@@ -253,16 +347,49 @@ impl Database {
                 schema: Schema { columns, types },
                 tree: BTree::new(),
                 next_row_id: 0,
+                mvcc: mvcc::MvccStore::new(),
             },
         ));
+        Ok(())
+    }
+
+    fn run_create_view(&mut self, cv: &CreateViewStatement) -> Result<(), DbError> {
+        if self.table(&cv.name).is_some() || self.views.iter().any(|(n, _)| n == &cv.name) {
+            return Err(DbError::ViewAlreadyExists(cv.name.clone()));
+        }
+        if select_references_table(&cv.query, &cv.name) {
+            return Err(DbError::RecursiveView(cv.name.clone()));
+        }
+        self.views.push((cv.name.clone(), cv.query.clone()));
+        Ok(())
+    }
+
+    fn run_drop_view(&mut self, name: &str) -> Result<(), DbError> {
+        let pos = self
+            .views
+            .iter()
+            .position(|(n, _)| n == name)
+            .ok_or_else(|| DbError::UnknownView(name.to_string()))?;
+        self.views.remove(pos);
         Ok(())
     }
 
     // --- INSERT -------------------------------------------------------------
 
     fn run_insert_stmt(&mut self, stmt: &InsertStatement) -> Result<(), DbError> {
-        let ts = self
-            .table_mut(&stmt.table)
+        let in_txn = self.in_transaction;
+        if in_txn {
+            self.ensure_txn(&stmt.table);
+        }
+        let Database {
+            tables,
+            active_txns,
+            ..
+        } = self;
+        let ts = tables
+            .iter_mut()
+            .find(|(n, _)| n == &stmt.table)
+            .map(|(_, t)| t)
             .ok_or_else(|| DbError::UnknownTable(stmt.table.clone()))?;
         let cols: Vec<usize> = if stmt.columns.is_empty() {
             (0..ts.schema.columns.len()).collect()
@@ -288,8 +415,18 @@ impl Database {
         if !cols.contains(&0) {
             row[0] = Value::Int(id as i64);
         }
-        let encoded = ts.encode_row(&row);
-        ts.tree.insert(id, encoded);
+        if in_txn {
+            let txn = active_txns
+                .iter_mut()
+                .find(|(n, _)| n == &stmt.table)
+                .map(|(_, t)| t)
+                .expect("ensure_txn guarantees a transaction exists");
+            let wrapped = Self::mvcc_wrap_row(&row);
+            ts.mvcc.write(txn, id, wrapped);
+        } else {
+            let encoded = ts.encode_row(&row);
+            ts.tree.insert(id, encoded);
+        }
         Ok(())
     }
 
@@ -315,6 +452,9 @@ impl Database {
                     for f in vec {
                         out.extend_from_slice(&f.to_le_bytes());
                     }
+                }
+                Value::Null => {
+                    out.push(3);
                 }
             }
         }
@@ -387,6 +527,7 @@ impl Database {
                     }
                     row.push(Value::Vector(vec));
                 }
+                3 => row.push(Value::Null),
                 _ => row.push(Value::Int(0)),
             }
         }
@@ -409,12 +550,39 @@ impl Database {
 
     fn run_update(&mut self, stmt: &UpdateStatement) -> Result<(), DbError> {
         let matching: Vec<u64> = self.matching_row_ids(&stmt.table, stmt.filter.as_ref())?;
-        let ts = self
-            .table_mut(&stmt.table)
-            .ok_or_else(|| DbError::UnknownTable(stmt.table.clone()))?;
+        let in_txn = self.in_transaction;
+        if in_txn {
+            self.ensure_txn(&stmt.table);
+        }
         for id in matching {
-            let bytes = ts.tree.get(id).ok_or(DbError::RowNotFound(id))?.to_vec();
-            let mut row = Self::decode_row_validated(id, &bytes, ts.schema.columns.len())?;
+            let Database {
+                tables,
+                active_txns,
+                ..
+            } = &mut *self;
+            let ts = tables
+                .iter_mut()
+                .find(|(n, _)| n == &stmt.table)
+                .map(|(_, t)| t)
+                .ok_or_else(|| DbError::UnknownTable(stmt.table.clone()))?;
+            let existing_txn = active_txns
+                .iter_mut()
+                .find(|(n, _)| n == &stmt.table)
+                .map(|(_, t)| t);
+
+            // Resolve the current row: this transaction's own buffered write
+            // (read-your-own-writes) if any, else the committed tree.
+            let mut row =
+                if let Some(buffered) = existing_txn.as_deref().and_then(|t| t.get_write(id)) {
+                    if buffered[0] == MVCC_TOMBSTONE {
+                        continue;
+                    }
+                    Self::decode_row_validated(id, &buffered[1..], ts.schema.columns.len())?
+                } else {
+                    let bytes = ts.tree.get(id).ok_or(DbError::RowNotFound(id))?.to_vec();
+                    Self::decode_row_validated(id, &bytes, ts.schema.columns.len())?
+                };
+
             for a in &stmt.assignments {
                 let slot = ts
                     .schema
@@ -425,19 +593,50 @@ impl Database {
                 }
                 row[slot] = ts.literal_to_value(slot, &a.value)?;
             }
-            let encoded = Self::encode_row(&row);
-            ts.tree.insert(id, encoded);
+
+            if in_txn {
+                let txn = active_txns
+                    .iter_mut()
+                    .find(|(n, _)| n == &stmt.table)
+                    .map(|(_, t)| t)
+                    .expect("ensure_txn guarantees a transaction exists");
+                let wrapped = Self::mvcc_wrap_row(&row);
+                ts.mvcc.write(txn, id, wrapped);
+            } else {
+                let encoded = Self::encode_row(&row);
+                ts.tree.insert(id, encoded);
+            }
         }
         Ok(())
     }
 
     fn run_delete(&mut self, stmt: &DeleteStatement) -> Result<(), DbError> {
         let matching = self.matching_row_ids(&stmt.table, stmt.filter.as_ref())?;
-        let ts = self
-            .table_mut(&stmt.table)
+        let in_txn = self.in_transaction;
+        if in_txn {
+            self.ensure_txn(&stmt.table);
+        }
+        let Database {
+            tables,
+            active_txns,
+            ..
+        } = self;
+        let ts = tables
+            .iter_mut()
+            .find(|(n, _)| n == &stmt.table)
+            .map(|(_, t)| t)
             .ok_or_else(|| DbError::UnknownTable(stmt.table.clone()))?;
         for id in matching {
-            ts.tree.delete(id);
+            if in_txn {
+                let txn = active_txns
+                    .iter_mut()
+                    .find(|(n, _)| n == &stmt.table)
+                    .map(|(_, t)| t)
+                    .expect("ensure_txn guarantees a transaction exists");
+                ts.mvcc.write(txn, id, Self::mvcc_wrap_tombstone());
+            } else {
+                ts.tree.delete(id);
+            }
         }
         Ok(())
     }
@@ -451,10 +650,23 @@ impl Database {
         let ts = self
             .table(table_name)
             .ok_or_else(|| DbError::UnknownTable(table_name.to_string()))?;
+        let txn = self
+            .active_txns
+            .iter()
+            .find(|(n, _)| n == table_name)
+            .map(|(_, t)| t);
         let mut out = Vec::new();
-        let mut id = 0u64;
-        while let Some(bytes) = ts.tree.get(id) {
-            let row = Self::decode_row_validated(id, bytes, ts.schema.columns.len())?;
+        for id in 0..ts.next_row_id {
+            let row = if let Some(buffered) = txn.and_then(|t| t.get_write(id)) {
+                if buffered[0] == MVCC_TOMBSTONE {
+                    continue;
+                }
+                Self::decode_row_validated(id, &buffered[1..], ts.schema.columns.len())?
+            } else if let Some(bytes) = ts.tree.get(id) {
+                Self::decode_row_validated(id, bytes, ts.schema.columns.len())?
+            } else {
+                continue;
+            };
             let keep = match filter {
                 None => true,
                 Some(expr) => executor::eval_expr(expr, &ts.schema.columns, &row)?,
@@ -462,7 +674,6 @@ impl Database {
             if keep {
                 out.push(id);
             }
-            id += 1;
         }
         Ok(out)
     }
@@ -472,14 +683,46 @@ impl Database {
         let ts = self
             .table(table_name)
             .ok_or_else(|| DbError::UnknownTable(table_name.to_string()))?;
+        let txn = self
+            .active_txns
+            .iter()
+            .find(|(n, _)| n == table_name)
+            .map(|(_, t)| t);
         let mut rows = Vec::new();
-        let mut id = 0u64;
-        while let Some(bytes) = ts.tree.get(id) {
-            let row = Self::decode_row_validated(id, bytes, ts.schema.columns.len())?;
-            rows.push(row);
-            id += 1;
+        for id in 0..ts.next_row_id {
+            if let Some(buffered) = txn.and_then(|t| t.get_write(id)) {
+                if buffered[0] == MVCC_TOMBSTONE {
+                    continue;
+                }
+                let row = Self::decode_row_validated(id, &buffered[1..], ts.schema.columns.len())?;
+                rows.push(row);
+                continue;
+            }
+            if let Some(bytes) = ts.tree.get(id) {
+                let row = Self::decode_row_validated(id, bytes, ts.schema.columns.len())?;
+                rows.push(row);
+            }
         }
         Ok((ts.schema.columns.clone(), rows))
+    }
+
+    /// Resolves a [`TableRef`] to `(columns, rows)`: a view substitution (if
+    /// `name` names a view), else a real table scan, for `Named`; a
+    /// derived-table substitution (once wired in a later phase) for
+    /// `Subquery`.
+    fn resolve_table_ref(&self, r: &TableRef) -> Result<(Vec<String>, Vec<Vec<Value>>), DbError> {
+        match r {
+            TableRef::Named(name) => {
+                if let Some((_, query)) = self.views.iter().find(|(n, _)| n == name) {
+                    let rs = self.run_select(query, &[])?;
+                    return Ok((rs.columns, rs.rows));
+                }
+                self.scan_table(name)
+            }
+            TableRef::Subquery { .. } => Err(DbError::Unsupported(
+                "subqueries in FROM are not yet supported".to_string(),
+            )),
+        }
     }
 
     // --- SELECT -------------------------------------------------------------
@@ -494,11 +737,11 @@ impl Database {
         }
 
         // Build an in-memory table from the source table + optional JOINs.
-        let (mut columns, mut rows) = self.scan_table(&stmt.table)?;
+        let (mut columns, mut rows) = self.resolve_table_ref(&stmt.table)?;
 
         // Process JOINs (nested-loop inner join).
         for join in &stmt.joins {
-            let (join_cols, join_rows) = self.scan_table(&join.table)?;
+            let (join_cols, join_rows) = self.resolve_table_ref(&join.table)?;
             let left_idx = columns
                 .iter()
                 .position(|c| c == &join.left_col)
@@ -512,7 +755,7 @@ impl Database {
             let mut new_cols = columns.clone();
             let mut new_rows = Vec::new();
             for rcol in &join_cols {
-                let name = alloc::format!("{}.{}", join.table, rcol);
+                let name = alloc::format!("{}.{}", join.table.name(), rcol);
                 new_cols.push(name);
             }
             for lrow in &rows {
@@ -547,7 +790,16 @@ impl Database {
 
         // Apply GROUP BY + aggregates.
         if !stmt.group_by.is_empty() || !stmt.aggregates.is_empty() {
-            table = self.apply_group_by(&table, stmt)?;
+            let rs = executor::aggregate_table(
+                &table.columns,
+                &table.rows,
+                &stmt.group_by,
+                &stmt.aggregates,
+            )?;
+            table = executor::Table {
+                columns: rs.columns,
+                rows: rs.rows,
+            };
         }
 
         let plan = {
@@ -568,141 +820,23 @@ impl Database {
         })
     }
 
-    /// Applies GROUP BY + aggregates to an in-memory table.
-    fn apply_group_by(
-        &self,
-        table: &executor::Table,
-        stmt: &SelectStatement,
-    ) -> Result<executor::Table, DbError> {
-        use alloc::collections::BTreeMap;
-
-        if stmt.group_by.is_empty() {
-            // Scalar aggregate: one output row.
-            let mut out_row = Vec::new();
-            let mut out_cols = Vec::new();
-            for (alias, func, col) in &stmt.aggregates {
-                out_row.push(self.eval_aggregate(*func, col, &table.columns, &table.rows)?);
-                out_cols.push(alias.clone());
-            }
-            let mut t = executor::Table::new(out_cols);
-            t.insert(out_row);
-            return Ok(t);
-        }
-
-        // Partition by group-by columns.
-        let gb_indices: Vec<usize> = stmt
-            .group_by
-            .iter()
-            .map(|c| {
-                table
-                    .columns
-                    .iter()
-                    .position(|ic| ic == c)
-                    .ok_or_else(|| DbError::UnknownColumn(c.clone()))
-            })
-            .collect::<Result<_, _>>()?;
-
-        let mut groups: BTreeMap<Vec<Value>, Vec<Vec<Value>>> = BTreeMap::new();
-        for row in &table.rows {
-            let key: Vec<Value> = gb_indices.iter().map(|&i| row[i].clone()).collect();
-            groups.entry(key).or_default().push(row.clone());
-        }
-
-        let mut out_cols = stmt.group_by.clone();
-        for (alias, _, _) in &stmt.aggregates {
-            out_cols.push(alias.clone());
-        }
-        let mut out_rows = Vec::new();
-        for group_rows in groups.values() {
-            let mut out_row = Vec::new();
-            for &idx in &gb_indices {
-                out_row.push(group_rows[0][idx].clone());
-            }
-            for (_alias, func, col) in &stmt.aggregates {
-                out_row.push(self.eval_aggregate(*func, col, &table.columns, group_rows)?);
-            }
-            out_rows.push(out_row);
-        }
-
-        let mut t = executor::Table::new(out_cols);
-        for row in out_rows {
-            t.insert(row);
-        }
-        Ok(t)
-    }
-
-    fn eval_aggregate(
-        &self,
-        func: AggregateFunc,
-        column: &str,
-        columns: &[String],
-        rows: &[Vec<Value>],
-    ) -> Result<Value, DbError> {
-        if func == AggregateFunc::Count {
-            return Ok(Value::Int(rows.len() as i64));
-        }
-        let idx = columns
-            .iter()
-            .position(|c| c == column)
-            .ok_or_else(|| DbError::UnknownColumn(column.to_string()))?;
-        match func {
-            AggregateFunc::Count => unreachable!(),
-            AggregateFunc::Sum => {
-                let sum: i64 = rows
-                    .iter()
-                    .filter_map(|r| match &r[idx] {
-                        Value::Int(v) => Some(*v),
-                        _ => None,
-                    })
-                    .sum();
-                Ok(Value::Int(sum))
-            }
-            AggregateFunc::Avg => {
-                let vals: Vec<i64> = rows
-                    .iter()
-                    .filter_map(|r| match &r[idx] {
-                        Value::Int(v) => Some(*v),
-                        _ => None,
-                    })
-                    .collect();
-                if vals.is_empty() {
-                    Ok(Value::Int(0))
-                } else {
-                    Ok(Value::Int(vals.iter().sum::<i64>() / vals.len() as i64))
-                }
-            }
-            AggregateFunc::Min => {
-                let min = rows
-                    .iter()
-                    .filter_map(|r| match &r[idx] {
-                        Value::Int(v) => Some(*v),
-                        _ => None,
-                    })
-                    .min();
-                Ok(Value::Int(min.unwrap_or(0)))
-            }
-            AggregateFunc::Max => {
-                let max = rows
-                    .iter()
-                    .filter_map(|r| match &r[idx] {
-                        Value::Int(v) => Some(*v),
-                        _ => None,
-                    })
-                    .max();
-                Ok(Value::Int(max.unwrap_or(0)))
-            }
-        }
-    }
-
     fn run_vector_topk(
         &self,
         stmt: &SelectStatement,
         ob: &OrderByCosine,
         params: &[Vec<f32>],
     ) -> Result<executor::ResultSet, DbError> {
+        let table_name = match &stmt.table {
+            TableRef::Named(name) => name.as_str(),
+            TableRef::Subquery { .. } => {
+                return Err(DbError::Unsupported(
+                    "ORDER BY cosine(...) over a derived table is not yet supported".to_string(),
+                ))
+            }
+        };
         let ts = self
-            .table(&stmt.table)
-            .ok_or_else(|| DbError::UnknownTable(stmt.table.clone()))?;
+            .table(table_name)
+            .ok_or_else(|| DbError::UnknownTable(table_name.to_string()))?;
         let slot = ts
             .schema
             .index_of(&ob.column)
@@ -747,12 +881,10 @@ impl Database {
     ) -> Result<Value, DbError> {
         let expected = &schema.types[slot];
         match (expected, lit) {
+            (_, crate::parser::Literal::Null) => Ok(Value::Null),
             (ColumnType::Int, crate::parser::Literal::Int(i)) => Ok(Value::Int(*i)),
             (ColumnType::Text, crate::parser::Literal::Text(t)) => Ok(Value::Text(t.clone())),
             (ColumnType::Vector, crate::parser::Literal::Vector(v)) => Ok(Value::Vector(v.clone())),
-            (ColumnType::Int, crate::parser::Literal::Null) => Ok(Value::Int(0)),
-            (ColumnType::Text, crate::parser::Literal::Null) => Ok(Value::Text(String::new())),
-            (ColumnType::Vector, crate::parser::Literal::Null) => Ok(Value::Vector(Vec::new())),
             (ColumnType::Int, _) | (ColumnType::Text, _) | (ColumnType::Vector, _) => {
                 Err(DbError::ColumnTypeMismatch(schema.columns[slot].clone()))
             }
@@ -779,6 +911,21 @@ fn empty_result_set() -> executor::ResultSet {
         columns: Vec::new(),
         rows: Vec::new(),
     }
+}
+
+/// Whether `stmt`'s `FROM`/`JOIN` clauses reference the (not-yet-created)
+/// table/view name `name` — used to reject a self-referencing `CREATE VIEW`
+/// up front, since forward references are otherwise impossible (a view can
+/// only reference tables/views that already exist).
+fn select_references_table(stmt: &SelectStatement, name: &str) -> bool {
+    if let TableRef::Named(n) = &stmt.table {
+        if n == name {
+            return true;
+        }
+    }
+    stmt.joins
+        .iter()
+        .any(|j| matches!(&j.table, TableRef::Named(n) if n == name))
 }
 
 #[cfg(test)]
@@ -934,6 +1081,100 @@ mod tests {
     }
 
     #[test]
+    fn rollback_actually_undoes_writes() {
+        // Regression test: ROLLBACK used to be a bare no-op (just flipped
+        // in_transaction back to false) — writes made inside the transaction
+        // were never undone. Now they must be, via the real mvcc store.
+        let mut d = db();
+        d.execute(
+            &parse_statement("INSERT INTO t (id, name, age) VALUES (0, 'seed', 1)").unwrap(),
+            &[],
+        )
+        .unwrap();
+
+        d.execute(&parse_statement("BEGIN").unwrap(), &[]).unwrap();
+        d.execute(
+            &parse_statement("INSERT INTO t (id, name, age) VALUES (1, 'ghost', 2)").unwrap(),
+            &[],
+        )
+        .unwrap();
+        d.execute(
+            &parse_statement("UPDATE t SET age = 99 WHERE id = 0").unwrap(),
+            &[],
+        )
+        .unwrap();
+        d.execute(&parse_statement("ROLLBACK").unwrap(), &[])
+            .unwrap();
+
+        let r = d
+            .execute(&parse_statement("SELECT id, age FROM t").unwrap(), &[])
+            .unwrap();
+        // Only the seed row should remain, with its original age.
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], Value::Int(0));
+        assert_eq!(r.rows[0][1], Value::Int(1));
+    }
+
+    #[test]
+    fn commit_applies_writes_made_during_transaction() {
+        let mut d = db();
+        d.execute(&parse_statement("BEGIN").unwrap(), &[]).unwrap();
+        d.execute(
+            &parse_statement("INSERT INTO t (id, name, age) VALUES (0, 'alice', 30)").unwrap(),
+            &[],
+        )
+        .unwrap();
+        d.execute(&parse_statement("COMMIT").unwrap(), &[]).unwrap();
+
+        let r = d
+            .execute(&parse_statement("SELECT id FROM t").unwrap(), &[])
+            .unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], Value::Int(0));
+    }
+
+    #[test]
+    fn reads_within_transaction_see_own_writes() {
+        let mut d = db();
+        d.execute(&parse_statement("BEGIN").unwrap(), &[]).unwrap();
+        d.execute(
+            &parse_statement("INSERT INTO t (id, name, age) VALUES (0, 'alice', 30)").unwrap(),
+            &[],
+        )
+        .unwrap();
+        // Not yet committed, but should be visible within the same transaction.
+        let r = d
+            .execute(&parse_statement("SELECT id FROM t").unwrap(), &[])
+            .unwrap();
+        assert_eq!(r.rows.len(), 1);
+        d.execute(&parse_statement("ROLLBACK").unwrap(), &[])
+            .unwrap();
+    }
+
+    #[test]
+    fn delete_within_transaction_rolls_back() {
+        let mut d = db();
+        d.execute(
+            &parse_statement("INSERT INTO t (id, name, age) VALUES (0, 'alice', 30)").unwrap(),
+            &[],
+        )
+        .unwrap();
+        d.execute(&parse_statement("BEGIN").unwrap(), &[]).unwrap();
+        d.execute(&parse_statement("DELETE FROM t WHERE id = 0").unwrap(), &[])
+            .unwrap();
+        let mid = d
+            .execute(&parse_statement("SELECT id FROM t").unwrap(), &[])
+            .unwrap();
+        assert_eq!(mid.rows.len(), 0);
+        d.execute(&parse_statement("ROLLBACK").unwrap(), &[])
+            .unwrap();
+        let after = d
+            .execute(&parse_statement("SELECT id FROM t").unwrap(), &[])
+            .unwrap();
+        assert_eq!(after.rows.len(), 1);
+    }
+
+    #[test]
     fn and_or_where_filter() {
         let mut d = db();
         for i in 0..5 {
@@ -1055,5 +1296,82 @@ mod tests {
             .collect();
         assert!(counts.contains(&2));
         assert!(counts.contains(&1));
+    }
+
+    #[test]
+    fn create_view_select_and_filter_through() {
+        let mut d = db();
+        for i in 0..5 {
+            let sql = alloc::format!("INSERT INTO t (id, name, age) VALUES ({i}, 'u{i}', {})", i * 10);
+            d.execute(&parse_statement(&sql).unwrap(), &[]).unwrap();
+        }
+        d.execute(
+            &parse_statement("CREATE VIEW adults AS SELECT * FROM t WHERE age >= 20").unwrap(),
+            &[],
+        )
+        .unwrap();
+        let r = d
+            .execute(&parse_statement("SELECT id FROM adults").unwrap(), &[])
+            .unwrap();
+        // ages 0,10,20,30,40 -> >=20 keeps ids 2,3,4
+        assert_eq!(r.rows.len(), 3);
+
+        let r2 = d
+            .execute(
+                &parse_statement("SELECT id FROM adults WHERE id = 3").unwrap(),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(r2.rows.len(), 1);
+        assert_eq!(r2.rows[0][0], Value::Int(3));
+    }
+
+    #[test]
+    fn drop_view_then_select_errors() {
+        let mut d = db();
+        d.execute(
+            &parse_statement("CREATE VIEW everyone AS SELECT * FROM t").unwrap(),
+            &[],
+        )
+        .unwrap();
+        d.execute(&parse_statement("DROP VIEW everyone").unwrap(), &[])
+            .unwrap();
+        assert!(matches!(
+            d.execute(&parse_statement("SELECT * FROM everyone").unwrap(), &[]),
+            Err(DbError::UnknownTable(_))
+        ));
+    }
+
+    #[test]
+    fn create_view_self_reference_errors() {
+        let mut d = db();
+        assert!(matches!(
+            d.execute(
+                &parse_statement("CREATE VIEW loop AS SELECT * FROM loop").unwrap(),
+                &[],
+            ),
+            Err(DbError::RecursiveView(_))
+        ));
+    }
+
+    #[test]
+    fn create_view_duplicate_name_errors() {
+        let mut d = db();
+        d.execute(
+            &parse_statement("CREATE VIEW everyone AS SELECT * FROM t").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(
+            d.execute(
+                &parse_statement("CREATE VIEW everyone AS SELECT * FROM t").unwrap(),
+                &[],
+            ),
+            Err(DbError::ViewAlreadyExists(_))
+        ));
+        assert!(matches!(
+            d.execute(&parse_statement("CREATE VIEW t AS SELECT * FROM t").unwrap(), &[]),
+            Err(DbError::ViewAlreadyExists(_))
+        ));
     }
 }

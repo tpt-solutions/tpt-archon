@@ -222,6 +222,15 @@ CI automation, differentiation ideas). Ordered de-risk-first.
 - [x] Expose SQL-level transactions (`BEGIN`/`COMMIT`/`ROLLBACK`) over the MVCC engine that already exists in `mvcc.rs` but isn't reachable from parsed SQL.
 - [ ] Reconcile `spec.txt`'s "PostgreSQL-compatible SQL dialect" / "drop-in replacement" language with actual grammar coverage, or scope the claim down until the above land — avoid repeating the marketing-ahead-of-reality pattern already flagged for zero-CVE claims in ADR 0003.
 
+### Phase 6 — Full SQL compatibility (subqueries, CTEs, views, ALTER TABLE)
+- [ ] Foundation: generalized `Expr` (`Literal`-based comparisons instead of hardcoded `i64`, real `IsNull`/`IsNotNull` semantics, `NOT` support), a `TableRef` enum replacing bare table-name strings, a DB-aware expression-evaluation calling convention, and a nested-scan `PlanNode` variant — the shared primitive views/subqueries/CTEs all build on.
+- [ ] Wire `BEGIN`/`COMMIT`/`ROLLBACK` to the existing `mvcc::MvccStore` instead of the current `in_transaction: bool` flag (today `ROLLBACK` is a no-op — writes are never undone).
+- [ ] `CREATE VIEW` / `DROP VIEW`.
+- [ ] Subqueries in `FROM` (derived tables) and scalar/`IN`/`EXISTS` subqueries in `WHERE`.
+- [ ] `WITH` (CTEs), non-recursive first; `WITH RECURSIVE` tracked separately as follow-up, not silently dropped.
+- [ ] `ALTER TABLE ADD COLUMN` / `DROP COLUMN` / `RENAME COLUMN` (parallel track — storage-format/row-codec migration work, no query-engine dependency).
+- [ ] Reconcile `spec.txt` wording once all boxes above are checked (this time for real, not by softening the claim).
+
 ### 5.3 Adoption — interactive entry point
 - [x] `archon-sql` REPL binary (first `[[bin]]` target in the workspace — none exists today) wrapping `relational::database::Database` so newcomers can run SQL interactively instead of only via `cargo run --example` or writing Rust.
 - [ ] Single-binary/Docker demo image built on the REPL, for a zero-install "try it" path.

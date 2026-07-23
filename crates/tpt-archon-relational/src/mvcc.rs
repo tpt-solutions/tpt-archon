@@ -46,6 +46,21 @@ pub struct Transaction {
     committed: bool,
 }
 
+impl Transaction {
+    /// Peeks at this transaction's own buffered write for `key`, if any,
+    /// without affecting its read-set — used for read-your-own-writes within
+    /// an open transaction, before it commits.
+    pub fn get_write(&self, key: u64) -> Option<&[u8]> {
+        self.writes.get(&key).map(|v| v.as_slice())
+    }
+
+    /// Iterates this transaction's buffered writes — used to apply them to
+    /// durable storage after a successful commit.
+    pub fn writes_iter(&self) -> impl Iterator<Item = (u64, &[u8])> {
+        self.writes.iter().map(|(k, v)| (*k, v.as_slice()))
+    }
+}
+
 /// Result of attempting to commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitError {
