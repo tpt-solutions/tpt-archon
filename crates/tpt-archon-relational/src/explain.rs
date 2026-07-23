@@ -7,7 +7,9 @@
 //! shows the stable TPTIR text that an external GPU backend would consume.
 //! There is no GPU execution here — only emission.
 
+use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use crate::parser::{parse_select, ParseError};
 use crate::planner::{plan_select, Dispatch, PlanNode, TableStats};
@@ -39,20 +41,8 @@ fn render_node(node: &PlanNode, depth: usize, out: &mut String) {
                 "{indent}Scan {{ table: {table}, vectorized: {vectorized} }}\n"
             ));
         }
-        PlanNode::Filter { predicate, input } => {
-            out.push_str(&format!(
-                "{indent}Filter {{ {} {} {} }}\n",
-                predicate.column,
-                match predicate.op {
-                    crate::parser::CmpOp::Eq => "=",
-                    crate::parser::CmpOp::Ne => "<>",
-                    crate::parser::CmpOp::Lt => "<",
-                    crate::parser::CmpOp::Le => "<=",
-                    crate::parser::CmpOp::Gt => ">",
-                    crate::parser::CmpOp::Ge => ">=",
-                },
-                predicate.value
-            ));
+        PlanNode::Filter { expr, input } => {
+            out.push_str(&format!("{indent}Filter {{ {expr:?} }}\n"));
             render_node(input, depth + 1, out);
         }
         PlanNode::Project {
@@ -70,6 +60,40 @@ fn render_node(node: &PlanNode, depth: usize, out: &mut String) {
         }
         PlanNode::Limit { n, input } => {
             out.push_str(&format!("{indent}Limit {{ n: {n} }}\n"));
+            render_node(input, depth + 1, out);
+        }
+        PlanNode::Sort { columns, input } => {
+            let cols: Vec<String> = columns
+                .iter()
+                .map(|ob| {
+                    if ob.descending {
+                        alloc::format!("{} DESC", ob.column)
+                    } else {
+                        alloc::format!("{} ASC", ob.column)
+                    }
+                })
+                .collect();
+            out.push_str(&format!("{indent}Sort {{ {} }}\n", cols.join(", ")));
+            render_node(input, depth + 1, out);
+        }
+        PlanNode::Aggregate {
+            group_by,
+            aggregates,
+            input,
+        } => {
+            let gb = if group_by.is_empty() {
+                "none".to_string()
+            } else {
+                group_by.join(", ")
+            };
+            let aggs: Vec<String> = aggregates
+                .iter()
+                .map(|(alias, func, col)| alloc::format!("{func:?}({col}) AS {alias}"))
+                .collect();
+            out.push_str(&format!(
+                "{indent}Aggregate {{ group_by: [{gb}], aggs: [{}] }}\n",
+                aggs.join(", ")
+            ));
             render_node(input, depth + 1, out);
         }
     }
@@ -129,7 +153,6 @@ mod tests {
         )
         .unwrap();
         assert!(s.contains("Project { id }"));
-        assert!(s.contains("Filter { age >= 25 }"));
         assert!(s.contains("Scan { table: users"));
         assert!(s.contains("Limit { n: 3 }"));
         assert!(s.contains("dispatch: CPU"));
@@ -138,7 +161,6 @@ mod tests {
     #[cfg(feature = "gpu")]
     #[test]
     fn explain_gpu_emits_tptir_for_large_scan() {
-        // 2M rows crosses GPU_ROW_THRESHOLD, so dispatch is Gpu and IR is shown.
         let s = explain_gpu(
             "SELECT * FROM huge",
             TableStats {

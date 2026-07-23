@@ -14,7 +14,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::parser::{Predicate, SelectStatement};
+use crate::parser::{Expr, OrderBy, SelectStatement};
 
 /// Coarse statistics about a table, used for cost estimation.
 #[derive(Debug, Clone, Copy)]
@@ -43,10 +43,10 @@ pub enum PlanNode {
         /// Whether the scan runs in vectorized (batched) mode.
         vectorized: bool,
     },
-    /// Filter rows by a predicate.
+    /// Filter rows by a boolean expression.
     Filter {
-        /// The predicate to apply.
-        predicate: Predicate,
+        /// The expression to evaluate.
+        expr: Expr,
         /// Input node.
         input: Box<PlanNode>,
     },
@@ -63,6 +63,22 @@ pub enum PlanNode {
     Limit {
         /// Maximum rows.
         n: u64,
+        /// Input node.
+        input: Box<PlanNode>,
+    },
+    /// Sort the result set.
+    Sort {
+        /// Sort specifications.
+        columns: Vec<OrderBy>,
+        /// Input node.
+        input: Box<PlanNode>,
+    },
+    /// Aggregate rows by group-by columns with aggregate functions.
+    Aggregate {
+        /// Columns to group by.
+        group_by: Vec<String>,
+        /// Aggregate functions to compute.
+        aggregates: Vec<(String, crate::parser::AggregateFunc, String)>,
         /// Input node.
         input: Box<PlanNode>,
     },
@@ -85,13 +101,43 @@ const VECTORIZE_ROW_THRESHOLD: u64 = 1024;
 const GPU_ROW_THRESHOLD: u64 = 1_000_000;
 
 /// Estimates predicate selectivity as a `(numerator, denominator)` fraction of
-/// rows kept. Integer math keeps this `no_std`-clean (no `f64::ceil`).
-fn selectivity(pred: &Predicate) -> (u64, u64) {
-    use crate::parser::CmpOp::*;
-    match pred.op {
-        Eq => (1, 10),
-        Ne => (9, 10),
-        Lt | Le | Gt | Ge => (1, 3),
+/// rows kept. Integer math keeps this `no_std`-clean.
+fn selectivity(expr: &Expr) -> (u64, u64) {
+    match expr {
+        Expr::Cmp {
+            op: crate::parser::CmpOp::Eq,
+            ..
+        } => (1, 10),
+        Expr::Cmp {
+            op: crate::parser::CmpOp::Ne,
+            ..
+        } => (9, 10),
+        Expr::Cmp { .. } => (1, 3),
+        Expr::IsNull(_) => (1, 20),
+        Expr::Like { .. } => (1, 5),
+        Expr::InInt { values, .. } => {
+            let n = values.len().max(1) as u64;
+            (n, 100)
+        }
+        Expr::BetweenInt { .. } => (1, 3),
+        Expr::And(l, r) => {
+            let (a, b) = selectivity(l);
+            let (c, d) = selectivity(r);
+            ((a * c).max(1), b * d)
+        }
+        Expr::Or(l, r) => {
+            let (a, b) = selectivity(l);
+            let (c, d) = selectivity(r);
+            // Approximate: P(A or B) = P(A) + P(B) - P(A)*P(B).
+            // For integer estimates: (a*d + c*b - a*c) / (b*d), capped at 1.
+            let num = a * d + c * b - a * c;
+            let den = b * d;
+            if num >= den {
+                (1, 1)
+            } else {
+                (num.max(1), den)
+            }
+        }
     }
 }
 
@@ -105,15 +151,27 @@ pub fn plan_select(stmt: &SelectStatement, stats: TableStats) -> Plan {
 
     let mut estimated = stats.row_count;
 
-    // Push filter directly above the scan (before projection).
-    if let Some(pred) = &stmt.filter {
-        let (num, den) = selectivity(pred);
-        // Ceiling division to keep at least one estimated row.
+    // Push filter directly above the scan.
+    if let Some(expr) = &stmt.filter {
+        let (num, den) = selectivity(expr);
         estimated = (estimated * num).div_ceil(den);
         node = PlanNode::Filter {
-            predicate: pred.clone(),
+            expr: expr.clone(),
             input: Box::new(node),
         };
+    }
+
+    // GROUP BY / aggregates.
+    if !stmt.group_by.is_empty() || !stmt.aggregates.is_empty() {
+        node = PlanNode::Aggregate {
+            group_by: stmt.group_by.clone(),
+            aggregates: stmt.aggregates.clone(),
+            input: Box::new(node),
+        };
+        // Group-by reduces estimated rows.
+        if !stmt.group_by.is_empty() {
+            estimated = estimated.div_ceil(10).max(1);
+        }
     }
 
     node = PlanNode::Project {
@@ -121,6 +179,14 @@ pub fn plan_select(stmt: &SelectStatement, stats: TableStats) -> Plan {
         star: stmt.star,
         input: Box::new(node),
     };
+
+    // ORDER BY (non-cosine).
+    if !stmt.order_by.is_empty() {
+        node = PlanNode::Sort {
+            columns: stmt.order_by.clone(),
+            input: Box::new(node),
+        };
+    }
 
     if let Some(n) = stmt.limit {
         estimated = estimated.min(n);
@@ -130,8 +196,6 @@ pub fn plan_select(stmt: &SelectStatement, stats: TableStats) -> Plan {
         };
     }
 
-    // Cost model: choose GPU only if built with the feature and the scan is
-    // large enough to amortize offload; otherwise CPU.
     let dispatch = if cfg!(feature = "gpu") && stats.row_count >= GPU_ROW_THRESHOLD {
         Dispatch::Gpu
     } else {
@@ -170,7 +234,6 @@ mod tests {
     fn large_tables_are_vectorized() {
         let stmt = parse_select("SELECT * FROM big").unwrap();
         let plan = plan_select(&stmt, TableStats { row_count: 10_000 });
-        // The innermost scan should be vectorized.
         if let PlanNode::Project { input, .. } = &plan.root {
             assert!(matches!(
                 **input,
@@ -200,9 +263,30 @@ mod tests {
                 row_count: 5_000_000,
             },
         );
-        // Without the gpu feature, always CPU.
         if !cfg!(feature = "gpu") {
             assert_eq!(plan.dispatch, Dispatch::Cpu);
+        }
+    }
+
+    #[test]
+    fn group_by_plans_aggregate_node() {
+        let stmt = parse_select("SELECT dept, COUNT(*) FROM t GROUP BY dept").unwrap();
+        let plan = plan_select(&stmt, TableStats { row_count: 100 });
+        assert!(matches!(plan.root, PlanNode::Project { .. }));
+    }
+
+    #[test]
+    fn order_by_plans_sort_node() {
+        let stmt = parse_select("SELECT * FROM t ORDER BY x DESC").unwrap();
+        let plan = plan_select(&stmt, TableStats { row_count: 100 });
+        // Root should be Limit (none) -> Sort -> Project -> Filter -> Scan.
+        // Since no limit, root is Sort wrapped by Project.
+        match &plan.root {
+            PlanNode::Sort { .. } => {}
+            PlanNode::Project { input, .. } => {
+                assert!(matches!(**input, PlanNode::Sort { .. }));
+            }
+            other => panic!("expected Sort or Project wrapping Sort, got {:?}", other),
         }
     }
 }

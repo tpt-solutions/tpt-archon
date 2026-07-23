@@ -6,10 +6,10 @@
 //! into the same [`Dispatch`] decision the planner already makes but is not
 //! required — every query has a working CPU fallback.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::parser::{CmpOp, Predicate};
+use crate::parser::{AggregateFunc, CmpOp, Expr};
 use crate::planner::{Plan, PlanNode};
 
 /// Rows processed per vectorized batch.
@@ -24,6 +24,38 @@ pub enum Value {
     Text(String),
     /// A fixed-width `f32` embedding vector (the `f32[]` column type).
     Vector(Vec<f32>),
+}
+
+impl Eq for Value {}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Text(a), Value::Text(b)) => a.cmp(b),
+            (Value::Vector(a), Value::Vector(b)) => {
+                // Compare lexicographically by length first, then element-wise.
+                a.len().cmp(&b.len()).then_with(|| {
+                    a.iter()
+                        .zip(b.iter())
+                        .map(|(x, y)| x.to_bits().cmp(&y.to_bits()))
+                        .find(|o| *o != core::cmp::Ordering::Equal)
+                        .unwrap_or(core::cmp::Ordering::Equal)
+                })
+            }
+            // Cross-variant ordering: Int < Text < Vector.
+            (Value::Int(_), _) => core::cmp::Ordering::Less,
+            (_, Value::Int(_)) => core::cmp::Ordering::Greater,
+            (Value::Text(_), _) => core::cmp::Ordering::Less,
+            (_, Value::Text(_)) => core::cmp::Ordering::Greater,
+        }
+    }
 }
 
 /// A row: values positionally aligned with the table's column names.
@@ -60,6 +92,8 @@ pub enum ExecError {
     UnknownColumn(String),
     /// The predicate compared against a non-integer column.
     TypeMismatch,
+    /// A GROUP BY column was not found.
+    GroupByColumnNotFound(String),
 }
 
 /// The result of running a query: output column names and rows.
@@ -71,13 +105,68 @@ pub struct ResultSet {
     pub rows: Vec<Row>,
 }
 
-fn cmp_matches(op: CmpOp, lhs: i64, rhs: i64) -> bool {
-    cmp_matches_pub(op, lhs, rhs)
+// ---------------------------------------------------------------------------
+// Expression evaluation
+// ---------------------------------------------------------------------------
+
+/// Evaluate an `Expr` against a row with the given column names.
+pub fn eval_expr(expr: &Expr, columns: &[String], row: &[Value]) -> Result<bool, ExecError> {
+    match expr {
+        Expr::Cmp { column, op, value } => {
+            let idx = columns
+                .iter()
+                .position(|c| c == column)
+                .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
+            match &row[idx] {
+                Value::Int(v) => Ok(eval_cmp(*op, *v, *value)),
+                Value::Text(t) => Ok(eval_text_cmp(*op, t, *value)),
+                Value::Vector(_) => Err(ExecError::TypeMismatch),
+            }
+        }
+        Expr::IsNull(column) => {
+            let idx = columns
+                .iter()
+                .position(|c| c == column)
+                .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
+            Ok(matches!(&row[idx], Value::Text(t) if t.is_empty())
+                || matches!(&row[idx], Value::Int(_)))
+        }
+        Expr::Like { column, pattern } => {
+            let idx = columns
+                .iter()
+                .position(|c| c == column)
+                .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
+            match &row[idx] {
+                Value::Text(t) => Ok(like_match(t, pattern)),
+                _ => Ok(false),
+            }
+        }
+        Expr::InInt { column, values } => {
+            let idx = columns
+                .iter()
+                .position(|c| c == column)
+                .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
+            match &row[idx] {
+                Value::Int(v) => Ok(values.contains(v)),
+                _ => Ok(false),
+            }
+        }
+        Expr::BetweenInt { column, low, high } => {
+            let idx = columns
+                .iter()
+                .position(|c| c == column)
+                .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
+            match &row[idx] {
+                Value::Int(v) => Ok(*v >= *low && *v <= *high),
+                _ => Ok(false),
+            }
+        }
+        Expr::And(l, r) => Ok(eval_expr(l, columns, row)? && eval_expr(r, columns, row)?),
+        Expr::Or(l, r) => Ok(eval_expr(l, columns, row)? || eval_expr(r, columns, row)?),
+    }
 }
 
-/// Public comparison helper used by the [`database`](crate::database) module's
-/// predicate evaluation over stored rows.
-pub fn cmp_matches_pub(op: CmpOp, lhs: i64, rhs: i64) -> bool {
+fn eval_cmp(op: CmpOp, lhs: i64, rhs: i64) -> bool {
     match op {
         CmpOp::Eq => lhs == rhs,
         CmpOp::Ne => lhs != rhs,
@@ -88,6 +177,120 @@ pub fn cmp_matches_pub(op: CmpOp, lhs: i64, rhs: i64) -> bool {
     }
 }
 
+/// Evaluate a text comparison (lexicographic).
+fn eval_text_cmp(op: CmpOp, lhs: &str, rhs: i64) -> bool {
+    // Compare text as its length against the integer — a simplification.
+    // For richer text comparisons, extend Literal to support Text on the RHS.
+    let len = lhs.len() as i64;
+    eval_cmp(op, len, rhs)
+}
+
+/// Simple SQL `LIKE` matching: `%` matches any sequence, `_` matches one char.
+fn like_match(text: &str, pattern: &str) -> bool {
+    let t = text.as_bytes();
+    let p = pattern.as_bytes();
+    like_recurse(t, p)
+}
+
+fn like_recurse(text: &[u8], pat: &[u8]) -> bool {
+    if pat.is_empty() {
+        return text.is_empty();
+    }
+    if pat[0] == b'%' {
+        // Try matching 0..text.len() characters.
+        for i in 0..=text.len() {
+            if like_recurse(&text[i..], &pat[1..]) {
+                return true;
+            }
+        }
+        false
+    } else if pat[0] == b'_' {
+        if text.is_empty() {
+            false
+        } else {
+            like_recurse(&text[1..], &pat[1..])
+        }
+    } else {
+        if text.is_empty() || text[0] != pat[0] {
+            false
+        } else {
+            like_recurse(&text[1..], &pat[1..])
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate evaluation
+// ---------------------------------------------------------------------------
+
+fn eval_aggregate(
+    func: AggregateFunc,
+    column: &str,
+    columns: &[String],
+    rows: &[Row],
+) -> Result<Value, ExecError> {
+    if func == AggregateFunc::Count {
+        return Ok(Value::Int(rows.len() as i64));
+    }
+    let idx = columns
+        .iter()
+        .position(|c| c == column)
+        .ok_or_else(|| ExecError::UnknownColumn(column.to_string()))?;
+
+    match func {
+        AggregateFunc::Count => unreachable!(),
+        AggregateFunc::Sum => {
+            let sum: i64 = rows
+                .iter()
+                .filter_map(|r| match &r[idx] {
+                    Value::Int(v) => Some(*v),
+                    _ => None,
+                })
+                .sum();
+            Ok(Value::Int(sum))
+        }
+        AggregateFunc::Avg => {
+            let vals: Vec<i64> = rows
+                .iter()
+                .filter_map(|r| match &r[idx] {
+                    Value::Int(v) => Some(*v),
+                    _ => None,
+                })
+                .collect();
+            if vals.is_empty() {
+                Ok(Value::Int(0))
+            } else {
+                let avg = vals.iter().sum::<i64>() / vals.len() as i64;
+                Ok(Value::Int(avg))
+            }
+        }
+        AggregateFunc::Min => {
+            let min = rows
+                .iter()
+                .filter_map(|r| match &r[idx] {
+                    Value::Int(v) => Some(*v),
+                    _ => None,
+                })
+                .min();
+            Ok(Value::Int(min.unwrap_or(0)))
+        }
+        AggregateFunc::Max => {
+            let max = rows
+                .iter()
+                .filter_map(|r| match &r[idx] {
+                    Value::Int(v) => Some(*v),
+                    _ => None,
+                })
+                .max();
+            Ok(Value::Int(max.unwrap_or(0)))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Execution
+// ---------------------------------------------------------------------------
+
 /// Executes `plan` against `table`.
 pub fn execute(plan: &Plan, table: &Table) -> Result<ResultSet, ExecError> {
     execute_node(&plan.root, table)
@@ -96,8 +299,6 @@ pub fn execute(plan: &Plan, table: &Table) -> Result<ResultSet, ExecError> {
 fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> {
     match node {
         PlanNode::Scan { .. } => {
-            // Vectorized scan: copy rows in batches (batching is observable in
-            // the loop structure; semantics are identical to a row scan).
             let mut rows = Vec::with_capacity(table.rows.len());
             for chunk in table.rows.chunks(BATCH_SIZE) {
                 rows.extend_from_slice(chunk);
@@ -107,25 +308,13 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
                 rows,
             })
         }
-        PlanNode::Filter { predicate, input } => {
+        PlanNode::Filter { expr, input } => {
             let inner = execute_node(input, table)?;
-            let idx = inner
-                .columns
-                .iter()
-                .position(|c| c == &predicate.column)
-                .ok_or_else(|| ExecError::UnknownColumn(predicate.column.clone()))?;
-            let Predicate { op, value, .. } = predicate;
             let mut rows = Vec::new();
-            // Vectorized filter: evaluate the predicate over each batch.
             for chunk in inner.rows.chunks(BATCH_SIZE) {
                 for row in chunk {
-                    match &row[idx] {
-                        Value::Int(v) => {
-                            if cmp_matches(*op, *v, *value) {
-                                rows.push(row.clone());
-                            }
-                        }
-                        Value::Text(_) | Value::Vector(_) => return Err(ExecError::TypeMismatch),
+                    if eval_expr(expr, &inner.columns, row)? {
+                        rows.push(row.clone());
                     }
                 }
             }
@@ -167,6 +356,92 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
             let mut inner = execute_node(input, table)?;
             inner.rows.truncate(*n as usize);
             Ok(inner)
+        }
+        PlanNode::Sort {
+            columns: sort_cols,
+            input,
+        } => {
+            let mut inner = execute_node(input, table)?;
+            // Build sort-key indices.
+            let sort_indices: Vec<(usize, bool)> = sort_cols
+                .iter()
+                .map(|ob| {
+                    let idx = inner
+                        .columns
+                        .iter()
+                        .position(|c| c == &ob.column)
+                        .unwrap_or(0);
+                    (idx, ob.descending)
+                })
+                .collect();
+            inner.rows.sort_by(|a, b| {
+                for &(idx, desc) in &sort_indices {
+                    let ord = match (&a[idx], &b[idx]) {
+                        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                        (Value::Text(x), Value::Text(y)) => x.cmp(y),
+                        _ => core::cmp::Ordering::Equal,
+                    };
+                    let ord = if desc { ord.reverse() } else { ord };
+                    if ord != core::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                }
+                core::cmp::Ordering::Equal
+            });
+            Ok(inner)
+        }
+        PlanNode::Aggregate {
+            group_by,
+            aggregates,
+            input,
+        } => {
+            let inner = execute_node(input, table)?;
+            if group_by.is_empty() {
+                // Scalar aggregate: one output row.
+                let mut out_row = Vec::new();
+                let mut out_cols = Vec::new();
+                for (alias, func, col) in aggregates {
+                    out_row.push(eval_aggregate(*func, col, &inner.columns, &inner.rows)?);
+                    out_cols.push(alias.clone());
+                }
+                Ok(ResultSet {
+                    columns: out_cols,
+                    rows: alloc::vec![out_row],
+                })
+            } else {
+                // Group-by aggregate: partition rows by group-by columns.
+                let gb_indices: Vec<usize> = group_by
+                    .iter()
+                    .map(|c| inner.columns.iter().position(|ic| ic == c).unwrap_or(0))
+                    .collect();
+                // Build groups.
+                let mut groups: alloc::collections::BTreeMap<Vec<Value>, Vec<Row>> =
+                    alloc::collections::BTreeMap::new();
+                for row in &inner.rows {
+                    let key: Vec<Value> = gb_indices.iter().map(|&i| row[i].clone()).collect();
+                    groups.entry(key).or_default().push(row.clone());
+                }
+                // Build output.
+                let mut out_cols = group_by.clone();
+                for (alias, _, _) in aggregates {
+                    out_cols.push(alias.clone());
+                }
+                let mut out_rows = Vec::new();
+                for group_rows in groups.values() {
+                    let mut out_row = Vec::new();
+                    for &idx in &gb_indices {
+                        out_row.push(group_rows[0][idx].clone());
+                    }
+                    for (_alias, func, col) in aggregates {
+                        out_row.push(eval_aggregate(*func, col, &inner.columns, group_rows)?);
+                    }
+                    out_rows.push(out_row);
+                }
+                Ok(ResultSet {
+                    columns: out_cols,
+                    rows: out_rows,
+                })
+            }
         }
     }
 }
@@ -228,7 +503,6 @@ mod tests {
         let t = users();
         let r = run("SELECT id FROM users WHERE age >= 25", &t);
         assert_eq!(r.columns, alloc::vec!["id".to_string()]);
-        // age >= 25 means id 5..=9
         assert_eq!(r.rows.len(), 5);
         assert_eq!(r.rows[0], alloc::vec![Value::Int(5)]);
     }
@@ -260,7 +534,89 @@ mod tests {
         ];
         let q = alloc::vec![1.0, 0.0];
         let top = vector_topk(&embeddings, &q, 2);
-        assert_eq!(top[0], 0); // exact match ranks first
-        assert_eq!(top[1], 2); // nearest neighbour second
+        assert_eq!(top[0], 0);
+        assert_eq!(top[1], 2);
+    }
+
+    #[test]
+    fn evaluates_and_or_expressions() {
+        let mut t = Table::new(alloc::vec![
+            "id".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+        ]);
+        for i in 0..10 {
+            t.insert(alloc::vec![Value::Int(i), Value::Int(i), Value::Int(i * 2),]);
+        }
+        let r = run("SELECT * FROM t WHERE a > 3 AND b < 12", &t);
+        // a > 3 → ids 4..=9; b < 12 → b = 0,2,4,6,8,10 → ids 0..=5
+        // Intersection: ids 4, 5
+        assert_eq!(r.rows.len(), 2);
+    }
+
+    #[test]
+    fn evaluates_in_list() {
+        let mut t = Table::new(alloc::vec!["id".to_string(), "x".to_string()]);
+        for i in 0..5 {
+            t.insert(alloc::vec![Value::Int(i), Value::Int(i * 10)]);
+        }
+        let r = run("SELECT * FROM t WHERE id IN (1, 3)", &t);
+        assert_eq!(r.rows.len(), 2);
+    }
+
+    #[test]
+    fn evaluates_between() {
+        let mut t = Table::new(alloc::vec!["id".to_string(), "x".to_string()]);
+        for i in 0..10 {
+            t.insert(alloc::vec![Value::Int(i), Value::Int(i)]);
+        }
+        let r = run("SELECT * FROM t WHERE x BETWEEN 3 AND 7", &t);
+        assert_eq!(r.rows.len(), 5);
+    }
+
+    #[test]
+    fn evaluates_like() {
+        let mut t = Table::new(alloc::vec!["id".to_string(), "name".to_string()]);
+        t.insert(alloc::vec![Value::Int(0), Value::Text("alice".to_string()),]);
+        t.insert(alloc::vec![Value::Int(1), Value::Text("bob".to_string()),]);
+        t.insert(alloc::vec![
+            Value::Int(2),
+            Value::Text("alicia".to_string()),
+        ]);
+        let r = run("SELECT * FROM t WHERE name LIKE 'al%'", &t);
+        assert_eq!(r.rows.len(), 2);
+    }
+
+    #[test]
+    fn sort_ascending() {
+        let mut t = Table::new(alloc::vec!["id".to_string(), "x".to_string()]);
+        t.insert(alloc::vec![Value::Int(2), Value::Int(20)]);
+        t.insert(alloc::vec![Value::Int(0), Value::Int(0)]);
+        t.insert(alloc::vec![Value::Int(1), Value::Int(10)]);
+        let r = run("SELECT * FROM t ORDER BY x ASC", &t);
+        assert_eq!(r.rows[0][1], Value::Int(0));
+        assert_eq!(r.rows[1][1], Value::Int(10));
+        assert_eq!(r.rows[2][1], Value::Int(20));
+    }
+
+    #[test]
+    fn aggregate_count() {
+        let mut t = Table::new(alloc::vec!["id".to_string(), "x".to_string()]);
+        for i in 0..5 {
+            t.insert(alloc::vec![Value::Int(i), Value::Int(i)]);
+        }
+        let r = run("SELECT COUNT(*) FROM t", &t);
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], Value::Int(5));
+    }
+
+    #[test]
+    fn aggregate_sum() {
+        let mut t = Table::new(alloc::vec!["id".to_string(), "x".to_string()]);
+        for i in 1..=4 {
+            t.insert(alloc::vec![Value::Int(i), Value::Int(i)]);
+        }
+        let r = run("SELECT SUM(x) FROM t", &t);
+        assert_eq!(r.rows[0][0], Value::Int(10));
     }
 }

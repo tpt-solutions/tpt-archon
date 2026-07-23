@@ -1,0 +1,22 @@
+[package]
+name = "archon-sql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Interactive SQL REPL for the TPT Archon database engine"
+
+[[bin]]
+name = "archon-sql"
+path = "src/main.rs"
+
+[features]
+default = []
+sqlite-import = ["dep:rusqlite"]
+
+[dependencies]
+tpt-archon-relational = { path = "../tpt-archon-relational" }
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }

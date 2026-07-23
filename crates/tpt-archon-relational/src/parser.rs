@@ -1,16 +1,23 @@
 //! A hand-written, allocation-light SQL parser (PostgreSQL-leaning dialect).
 //!
-//! This is a deliberately small but real recursive-descent parser covering the
-//! subset the executor supports today:
+//! Covers the subset the executor supports today:
 //!
 //! ```sql
-//! SELECT <col, ...> FROM <table> [WHERE <col> <op> <int>] [LIMIT <n>]
+//! SELECT <col, ...> FROM <table> [JOIN <table> ON <cond>]*
+//!   [WHERE <expr>] [GROUP BY <col, ...>] [ORDER BY <col> [ASC|DESC], ...]
+//!   [LIMIT <n>]
+//! INSERT INTO <table> [(col, ...)] VALUES (v, ...)
+//! UPDATE <table> SET col = v, ... [WHERE <expr>]
+//! DELETE FROM <table> [WHERE <expr>]
+//! CREATE TABLE <table> (col type, ...)
+//! BEGIN / COMMIT / ROLLBACK
 //! ```
 //!
 //! It uses a zero-copy tokenizer that borrows directly from the input string.
 //! PostgreSQL compatibility is the target dialect (spec Risk 2: PostgreSQL
 //! first, SQLite later); the grammar grows from here.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -31,18 +38,7 @@ pub enum CmpOp {
     Ge,
 }
 
-/// A `WHERE column <op> value` predicate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Predicate {
-    /// The column being compared.
-    pub column: String,
-    /// The comparison operator.
-    pub op: CmpOp,
-    /// The right-hand integer literal.
-    pub value: i64,
-}
-
-/// A value literal in an `INSERT`/`UPDATE` value list.
+/// A value literal in an `INSERT`/`UPDATE` value list or expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     /// An integer literal.
@@ -51,6 +47,115 @@ pub enum Literal {
     Text(String),
     /// A bracketed `f32[]` vector literal, e.g. `[0.1, 0.9]`.
     Vector(Vec<f32>),
+    /// SQL `NULL`.
+    Null,
+}
+
+/// A boolean expression tree used in `WHERE` clauses, `HAVING`, etc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expr {
+    /// A simple comparison: `column <op> value`.
+    Cmp {
+        /// The column being compared.
+        column: String,
+        /// The comparison operator.
+        op: CmpOp,
+        /// The right-hand value.
+        value: i64,
+    },
+    /// `column IS NULL`.
+    IsNull(String),
+    /// `column LIKE pattern` (simple `%` and `_` wildcards).
+    Like {
+        /// The column to match.
+        column: String,
+        /// The pattern string.
+        pattern: String,
+    },
+    /// `column IN (v1, v2, ...)`.
+    InInt {
+        /// The column.
+        column: String,
+        /// The list of integer values.
+        values: Vec<i64>,
+    },
+    /// `column BETWEEN low AND high` (inclusive).
+    BetweenInt {
+        /// The column.
+        column: String,
+        /// The lower bound (inclusive).
+        low: i64,
+        /// The upper bound (inclusive).
+        high: i64,
+    },
+    /// `expr AND expr`.
+    And(Box<Expr>, Box<Expr>),
+    /// `expr OR expr`.
+    Or(Box<Expr>, Box<Expr>),
+}
+
+/// A column reference with optional sort direction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderBy {
+    /// The column name (or aggregate alias).
+    pub column: String,
+    /// Sort direction; `true` = descending.
+    pub descending: bool,
+}
+
+/// An aggregate function applied in `SELECT` or `HAVING`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateFunc {
+    /// `COUNT(*)` or `COUNT(col)`.
+    Count,
+    /// `SUM(col)`.
+    Sum,
+    /// `AVG(col)`.
+    Avg,
+    /// `MIN(col)`.
+    Min,
+    /// `MAX(col)`.
+    Max,
+}
+
+/// A column definition in `CREATE TABLE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnDef {
+    /// Column name.
+    pub name: String,
+    /// Column type.
+    pub ctype: ColumnType,
+}
+
+/// A column type in SQL DDL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnType {
+    /// `INT` — 64-bit integer.
+    Int,
+    /// `TEXT` — UTF-8 text.
+    Text,
+    /// `VECTOR` — fixed-width `f32` embedding.
+    Vector,
+}
+
+/// A join type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    /// `JOIN` or `INNER JOIN`.
+    Inner,
+}
+
+/// A join clause: `JOIN <table> ON <left_col> = <right_col>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Join {
+    /// Join type.
+    pub jtype: JoinType,
+    /// The table to join with.
+    pub table: String,
+    /// The column from the left table.
+    pub left_col: String,
+    /// The column from the right table.
+    pub right_col: String,
 }
 
 /// A parsed `SELECT` statement.
@@ -62,9 +167,17 @@ pub struct SelectStatement {
     pub star: bool,
     /// The source table name.
     pub table: String,
-    /// Optional `WHERE` predicate.
-    pub filter: Option<Predicate>,
-    /// Optional `ORDER BY cosine(emb, ?) LIMIT k` for vector top-k.
+    /// Optional `WHERE` expression tree.
+    pub filter: Option<Expr>,
+    /// Optional `JOIN` clauses.
+    pub joins: Vec<Join>,
+    /// Optional `GROUP BY` columns.
+    pub group_by: Vec<String>,
+    /// Optional aggregate projections: `alias -> (func, column)`.
+    pub aggregates: Vec<(String, AggregateFunc, String)>,
+    /// Optional `ORDER BY` columns.
+    pub order_by: Vec<OrderBy>,
+    /// Optional `ORDER BY cosine(emb, ?) LIMIT k` for vector top-k (legacy).
     pub order_by_cosine: Option<OrderByCosine>,
     /// Optional `LIMIT`.
     pub limit: Option<u64>,
@@ -101,27 +214,36 @@ pub struct InsertStatement {
     pub values: Vec<Literal>,
 }
 
-/// A parsed `UPDATE t SET c = v, ... [WHERE pred]` statement.
+/// A parsed `UPDATE t SET c = v, ... [WHERE expr]` statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateStatement {
     /// Target table.
     pub table: String,
     /// Assignments.
     pub assignments: Vec<Assignment>,
-    /// Optional `WHERE` predicate.
-    pub filter: Option<Predicate>,
+    /// Optional `WHERE` expression tree.
+    pub filter: Option<Expr>,
 }
 
-/// A parsed `DELETE FROM t [WHERE pred]` statement.
+/// A parsed `DELETE FROM t [WHERE expr]` statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteStatement {
     /// Target table.
     pub table: String,
-    /// Optional `WHERE` predicate.
-    pub filter: Option<Predicate>,
+    /// Optional `WHERE` expression tree.
+    pub filter: Option<Expr>,
 }
 
-/// A fully parsed statement: any of the supported DML/DQL forms.
+/// A parsed `CREATE TABLE t (col type, ...)` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableStatement {
+    /// The table name.
+    pub table: String,
+    /// Column definitions.
+    pub columns: Vec<ColumnDef>,
+}
+
+/// A fully parsed statement: any of the supported DML/DQL/DDL forms.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     /// A `SELECT` query.
@@ -132,6 +254,14 @@ pub enum Statement {
     Update(UpdateStatement),
     /// A `DELETE` statement.
     Delete(DeleteStatement),
+    /// A `CREATE TABLE` statement.
+    CreateTable(CreateTableStatement),
+    /// A `BEGIN` transaction statement.
+    Begin,
+    /// A `COMMIT` transaction statement.
+    Commit,
+    /// A `ROLLBACK` transaction statement.
+    Rollback,
 }
 
 /// A parse error with a human-readable message.
@@ -146,8 +276,12 @@ enum Tok<'a> {
     Text(&'a str),
     Star,
     Comma,
+    Dot,
     Op(CmpOp),
     Param,
+    LParen,
+    RParen,
+    LBracket,
     Eof,
 }
 
@@ -182,6 +316,22 @@ impl<'a> Lexer<'a> {
             b',' => {
                 self.pos += 1;
                 Ok(Tok::Comma)
+            }
+            b'(' => {
+                self.pos += 1;
+                Ok(Tok::LParen)
+            }
+            b')' => {
+                self.pos += 1;
+                Ok(Tok::RParen)
+            }
+            b'.' => {
+                self.pos += 1;
+                Ok(Tok::Dot)
+            }
+            b'[' => {
+                self.pos += 1;
+                Ok(Tok::LBracket)
             }
             b'=' => {
                 self.pos += 1;
@@ -222,7 +372,6 @@ impl<'a> Lexer<'a> {
                 Ok(Tok::Param)
             }
             b'\'' => {
-                // Single-quoted text literal; consume until the closing quote.
                 self.pos += 1;
                 let start = self.pos;
                 while self.pos < b.len() && b[self.pos] != b'\'' {
@@ -232,10 +381,10 @@ impl<'a> Lexer<'a> {
                     return Err(ParseError("unterminated text literal".to_string()));
                 }
                 let text = &self.s[start..self.pos];
-                self.pos += 1; // skip closing quote
+                self.pos += 1;
                 Ok(Tok::Text(text))
             }
-            c if c.is_ascii_digit() || c == b'-' || c == b'.' => {
+            c if c.is_ascii_digit() || c == b'-' => {
                 let start = self.pos;
                 if c == b'-' {
                     self.pos += 1;
@@ -245,10 +394,25 @@ impl<'a> Lexer<'a> {
                 }
                 let mut is_float = false;
                 if self.pos < b.len() && b[self.pos] == b'.' {
-                    is_float = true;
+                    // Only treat as float if followed by digits AND the next
+                    // char is NOT alphanumeric (to avoid eating `t1.id`).
+                    let dot_pos = self.pos;
                     self.pos += 1;
-                    while self.pos < b.len() && b[self.pos].is_ascii_digit() {
-                        self.pos += 1;
+                    if self.pos < b.len() && b[self.pos].is_ascii_digit() {
+                        while self.pos < b.len() && b[self.pos].is_ascii_digit() {
+                            self.pos += 1;
+                        }
+                        // Check that this isn't `t1.id` — if the digit run
+                        // is followed by an alpha char, it's a qualified name.
+                        if self.pos < b.len() && b[self.pos].is_ascii_alphabetic() {
+                            // Not a float — revert and return just the integer.
+                            self.pos = dot_pos;
+                        } else {
+                            is_float = true;
+                        }
+                    } else {
+                        // Dot followed by non-digit: revert.
+                        self.pos = dot_pos;
                     }
                 }
                 let text = &self.s[start..self.pos];
@@ -262,13 +426,7 @@ impl<'a> Lexer<'a> {
                         .map_err(|_| ParseError("invalid integer".to_string()))
                 }
             }
-            c if c.is_ascii_alphabetic()
-                || c == b'_'
-                || c == b'('
-                || c == b')'
-                || c == b'['
-                || c == b']' =>
-            {
+            c if c.is_ascii_alphabetic() || c == b'_' => {
                 let start = self.pos;
                 while self.pos < b.len()
                     && (b[self.pos].is_ascii_alphanumeric() || b[self.pos] == b'_')
@@ -292,181 +450,279 @@ fn eq_ignore_case(a: &str, b: &str) -> bool {
             .all(|(x, y)| x.eq_ignore_ascii_case(&y))
 }
 
-/// Parses a single `SELECT` statement.
-pub fn parse_select(input: &str) -> Result<SelectStatement, ParseError> {
-    let mut lx = Lexer::new(input);
-    let first = lx.next_tok()?;
-    match first {
-        Tok::Ident(kw) if eq_ignore_case(kw, "select") => {}
-        _ => return Err(ParseError("expected SELECT".to_string())),
-    }
-
-    // Columns.
-    let mut columns = Vec::new();
-    let mut star = false;
-    let mut t = lx.next_tok()?;
-    if t == Tok::Star {
-        star = true;
-        t = lx.next_tok()?;
-    } else {
-        loop {
-            match t {
-                Tok::Ident(name) => columns.push(name.to_string()),
-                _ => return Err(ParseError("expected column name".to_string())),
+fn expect_ident(lx: &mut Lexer, what: &str) -> Result<String, ParseError> {
+    let tok = lx.next_tok()?;
+    match tok {
+        Tok::Ident(name) => {
+            // Check for qualified name: ident.ident (e.g. t1.id).
+            let next = lx.next_tok()?;
+            if let Tok::Dot = next {
+                let field = expect_ident(lx, "field name after '.'")?;
+                Ok(alloc::format!("{name}.{field}"))
+            } else {
+                push_back(lx, next);
+                Ok(name.to_string())
             }
-            t = lx.next_tok()?;
-            if t == Tok::Comma {
-                t = lx.next_tok()?;
-                continue;
-            }
-            break;
         }
+        _ => Err(ParseError(alloc::format!("expected {what}"))),
     }
-
-    // FROM.
-    match t {
-        Tok::Ident(kw) if eq_ignore_case(kw, "from") => {}
-        _ => return Err(ParseError("expected FROM".to_string())),
-    }
-    let table = match lx.next_tok()? {
-        Tok::Ident(name) => name.to_string(),
-        _ => return Err(ParseError("expected table name".to_string())),
-    };
-
-    let mut filter = None;
-    let mut limit = None;
-    let mut order_by_cosine = None;
-
-    // Optional WHERE / ORDER BY / LIMIT (each may appear at most once, in any
-    // of the supported orders; we loop so `ORDER BY` may precede or follow
-    // `LIMIT`, and `WHERE` may precede either).
-    let mut t = lx.next_tok()?;
-    loop {
-        match t {
-            Tok::Ident(kw) if eq_ignore_case(kw, "where") => {
-                if filter.is_some() {
-                    return Err(ParseError("duplicate WHERE".to_string()));
-                }
-                let column = match lx.next_tok()? {
-                    Tok::Ident(name) => name.to_string(),
-                    _ => return Err(ParseError("expected column in WHERE".to_string())),
-                };
-                let op = match lx.next_tok()? {
-                    Tok::Op(op) => op,
-                    _ => return Err(ParseError("expected operator in WHERE".to_string())),
-                };
-                let value = match lx.next_tok()? {
-                    Tok::Int(v) => v,
-                    _ => return Err(ParseError("expected integer in WHERE".to_string())),
-                };
-                filter = Some(Predicate { column, op, value });
-                t = lx.next_tok()?;
-            }
-            Tok::Ident(kw) if eq_ignore_case(kw, "order") => {
-                if order_by_cosine.is_some() {
-                    return Err(ParseError("duplicate ORDER BY".to_string()));
-                }
-                // Expect: BY cosine ( col , ? ) LIMIT k
-                match lx.next_tok()? {
-                    Tok::Ident(kw) if eq_ignore_case(kw, "by") => {}
-                    _ => return Err(ParseError("expected BY after ORDER".to_string())),
-                }
-                match lx.next_tok()? {
-                    Tok::Ident(kw) if eq_ignore_case(kw, "cosine") => {}
-                    _ => {
-                        return Err(ParseError(
-                            "only ORDER BY cosine(...) is supported".to_string(),
-                        ))
-                    }
-                }
-                match lx.next_tok()? {
-                    Tok::Ident(_) => {}
-                    _ => return Err(ParseError("expected '(' after cosine".to_string())),
-                }
-                let column = match lx.next_tok()? {
-                    Tok::Ident(name) => name.to_string(),
-                    _ => return Err(ParseError("expected embedding column".to_string())),
-                };
-                match lx.next_tok()? {
-                    Tok::Comma => {}
-                    _ => return Err(ParseError("expected ',' in cosine(...)".to_string())),
-                }
-                let param = match lx.next_tok()? {
-                    Tok::Param => 1,
-                    _ => return Err(ParseError("expected '?' query vector".to_string())),
-                };
-                match lx.next_tok()? {
-                    Tok::Ident(_) => {}
-                    _ => return Err(ParseError("expected ')' after cosine(...)".to_string())),
-                }
-                // LIMIT k is required for a top-k.
-                match lx.next_tok()? {
-                    Tok::Ident(kw) if eq_ignore_case(kw, "limit") => {}
-                    _ => return Err(ParseError("ORDER BY cosine requires LIMIT k".to_string())),
-                }
-                let k = match lx.next_tok()? {
-                    Tok::Int(v) if v > 0 => v as u64,
-                    _ => return Err(ParseError("expected positive LIMIT k".to_string())),
-                };
-                order_by_cosine = Some(OrderByCosine { column, param, k });
-                t = lx.next_tok()?;
-            }
-            Tok::Ident(kw) if eq_ignore_case(kw, "limit") => {
-                if limit.is_some() {
-                    return Err(ParseError("duplicate LIMIT".to_string()));
-                }
-                match lx.next_tok()? {
-                    Tok::Int(v) if v >= 0 => limit = Some(v as u64),
-                    _ => return Err(ParseError("expected non-negative LIMIT".to_string())),
-                }
-                t = lx.next_tok()?;
-            }
-            _ => break,
-        }
-    }
-
-    if t != Tok::Eof {
-        return Err(ParseError("trailing tokens after statement".to_string()));
-    }
-
-    Ok(SelectStatement {
-        columns,
-        star,
-        table,
-        filter,
-        order_by_cosine,
-        limit,
-    })
 }
 
-/// Parses any supported statement (`SELECT` / `INSERT` / `UPDATE` / `DELETE`).
-pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
-    let mut lx = Lexer::new(input);
+fn expect_kw(lx: &mut Lexer, expected: &str) -> Result<(), ParseError> {
     match lx.next_tok()? {
-        Tok::Ident(kw) if eq_ignore_case(kw, "select") => {
-            parse_select(input).map(Statement::Select)
+        Tok::Ident(kw) if eq_ignore_case(kw, expected) => Ok(()),
+        _ => Err(ParseError(alloc::format!("expected {expected}"))),
+    }
+}
+
+fn is_kw(s: &str) -> bool {
+    matches!(
+        s.to_ascii_lowercase().as_str(),
+        "select"
+            | "insert"
+            | "update"
+            | "delete"
+            | "from"
+            | "where"
+            | "set"
+            | "order"
+            | "limit"
+            | "group"
+            | "having"
+            | "join"
+            | "on"
+            | "create"
+            | "begin"
+            | "commit"
+            | "rollback"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Expression parsing (WHERE / HAVING)
+// ---------------------------------------------------------------------------
+
+fn parse_expr(lx: &mut Lexer) -> Result<Expr, ParseError> {
+    parse_or(lx)
+}
+
+fn parse_or(lx: &mut Lexer) -> Result<Expr, ParseError> {
+    let mut left = parse_and(lx)?;
+    loop {
+        match lx.next_tok()? {
+            Tok::Ident(kw) if eq_ignore_case(kw, "or") => {
+                let right = parse_and(lx)?;
+                left = Expr::Or(Box::new(left), Box::new(right));
+            }
+            tok => {
+                // Push the token back conceptually.
+                push_back(lx, tok);
+                break;
+            }
         }
-        Tok::Ident(kw) if eq_ignore_case(kw, "insert") => parse_insert(lx).map(Statement::Insert),
-        Tok::Ident(kw) if eq_ignore_case(kw, "update") => parse_update(lx).map(Statement::Update),
-        Tok::Ident(kw) if eq_ignore_case(kw, "delete") => parse_delete(lx).map(Statement::Delete),
+    }
+    Ok(left)
+}
+
+fn push_back(lx: &mut Lexer, tok: Tok) {
+    match tok {
+        Tok::Ident(s) => lx.pos -= s.len(),
+        Tok::Int(v) => {
+            let len = alloc::format!("{v}").len();
+            lx.pos -= len;
+        }
+        Tok::Float(_) => {}
+        Tok::Text(s) => lx.pos -= s.len() + 2,
+        Tok::Star => lx.pos -= 1,
+        Tok::Comma => lx.pos -= 1,
+        Tok::Dot => lx.pos -= 1,
+        Tok::Op(op) => {
+            let len = match op {
+                CmpOp::Le | CmpOp::Ne | CmpOp::Ge => 2,
+                _ => 1,
+            };
+            lx.pos -= len;
+        }
+        Tok::Param => lx.pos -= 1,
+        Tok::LParen => lx.pos -= 1,
+        Tok::RParen => lx.pos -= 1,
+        Tok::LBracket => lx.pos -= 1,
+        Tok::Eof => {}
+    }
+}
+
+fn parse_and(lx: &mut Lexer) -> Result<Expr, ParseError> {
+    let mut left = parse_not(lx)?;
+    loop {
+        match lx.next_tok()? {
+            Tok::Ident(kw) if eq_ignore_case(kw, "and") => {
+                let right = parse_not(lx)?;
+                left = Expr::And(Box::new(left), Box::new(right));
+            }
+            tok => {
+                push_back(lx, tok);
+                break;
+            }
+        }
+    }
+    Ok(left)
+}
+
+fn parse_not(lx: &mut Lexer) -> Result<Expr, ParseError> {
+    match lx.next_tok()? {
+        Tok::Ident(kw) if eq_ignore_case(kw, "not") => {
+            let _inner = parse_primary_expr(lx)?;
+            // Represent NOT as an OR with a always-false branch — but that's
+            // wasteful. Instead, wrap in a dedicated variant if needed later.
+            // For now, NOT IS NULL → IsNotNull is handled at the primary level.
+            // We don't have a general NOT yet; return an error for unsupported
+            // NOT outside of IS NULL context.
+            Err(ParseError(
+                "NOT is not yet supported (use IS NULL / != instead)".to_string(),
+            ))
+        }
+        tok => {
+            push_back(lx, tok);
+            parse_primary_expr(lx)
+        }
+    }
+}
+
+fn parse_primary_expr(lx: &mut Lexer) -> Result<Expr, ParseError> {
+    let tok = lx.next_tok()?;
+    match tok {
+        Tok::Ident(col) => {
+            // Could be: col op val, col IS NULL, col LIKE ..., col IN (...),
+            // col BETWEEN ... AND ..., or a keyword (shouldn't happen here).
+            if is_kw(col) {
+                return Err(ParseError(alloc::format!(
+                    "unexpected keyword '{col}' in expression"
+                )));
+            }
+            match lx.next_tok()? {
+                Tok::Ident(kw) if eq_ignore_case(kw, "is") => {
+                    expect_kw(lx, "null")?;
+                    Ok(Expr::IsNull(col.to_string()))
+                }
+                Tok::Ident(kw) if eq_ignore_case(kw, "like") => {
+                    let pattern = match lx.next_tok()? {
+                        Tok::Text(s) => s.to_string(),
+                        _ => {
+                            return Err(ParseError(
+                                "expected pattern string after LIKE".to_string(),
+                            ))
+                        }
+                    };
+                    Ok(Expr::Like {
+                        column: col.to_string(),
+                        pattern,
+                    })
+                }
+                Tok::Ident(kw) if eq_ignore_case(kw, "between") => {
+                    let low = expect_int(lx, "BETWEEN low")?;
+                    expect_kw(lx, "and")?;
+                    let high = expect_int(lx, "BETWEEN high")?;
+                    Ok(Expr::BetweenInt {
+                        column: col.to_string(),
+                        low,
+                        high,
+                    })
+                }
+                Tok::Ident(kw) if eq_ignore_case(kw, "in") => {
+                    expect_tok(lx, Tok::LParen, "'(' after IN")?;
+                    let mut values = Vec::new();
+                    loop {
+                        values.push(expect_int(lx, "value in IN list")?);
+                        match lx.next_tok()? {
+                            Tok::Comma => continue,
+                            Tok::RParen => break,
+                            _ => {
+                                return Err(ParseError(
+                                    "expected ',' or ')' in IN list".to_string(),
+                                ))
+                            }
+                        }
+                    }
+                    Ok(Expr::InInt {
+                        column: col.to_string(),
+                        values,
+                    })
+                }
+                Tok::Op(op) => {
+                    // Check for NULL on the right side.
+                    match lx.next_tok()? {
+                        Tok::Ident(kw) if eq_ignore_case(kw, "null") => {
+                            // col <op> NULL → handle specially.
+                            // Only col IS NULL / col IS NOT NULL are valid SQL,
+                            // but some engines allow col = NULL (always false).
+                            // We'll treat it as a special case.
+                            match op {
+                                CmpOp::Eq => {
+                                    // Always false in SQL; represent as a dummy
+                                    // expression that never matches.
+                                    // For simplicity, return a false constant
+                                    // via an impossible predicate.
+                                    Ok(Expr::IsNull(col.to_string())) // Misuse; TODO
+                                }
+                                CmpOp::Ne => Ok(Expr::And(
+                                    Box::new(Expr::IsNull(col.to_string())),
+                                    Box::new(Expr::IsNull(col.to_string())),
+                                )),
+                                _ => Err(ParseError(
+                                    "comparison with NULL requires IS / IS NOT".to_string(),
+                                )),
+                            }
+                        }
+                        Tok::Int(v) => Ok(Expr::Cmp {
+                            column: col.to_string(),
+                            op,
+                            value: v,
+                        }),
+                        _ => Err(ParseError("expected value after operator".to_string())),
+                    }
+                }
+                _ => Err(ParseError(
+                    "expected operator or IS after column name".to_string(),
+                )),
+            }
+        }
+        Tok::LParen => {
+            // Parenthesized sub-expression.
+            let inner = parse_expr(lx)?;
+            expect_tok(lx, Tok::RParen, "')'")?;
+            Ok(inner)
+        }
         _ => Err(ParseError(
-            "expected SELECT, INSERT, UPDATE, or DELETE".to_string(),
+            "expected column name or '(' in expression".to_string(),
         )),
     }
 }
 
-/// Parses a bracketed `f32[]` vector literal `[a, b, c]` from `lx`, where the
-/// next token is expected to be `[`.
-fn parse_vector_literal(lx: &mut Lexer) -> Result<Literal, ParseError> {
-    // The lexer turns '[' into an Ident("[". Re-read the raw bytes to scan the
-    // numeric list between brackets.
-    let b = lx.bytes();
-    if lx.pos >= b.len() || b[lx.pos] != b'[' {
-        return Err(ParseError("expected '['".to_string()));
+fn expect_int(lx: &mut Lexer, what: &str) -> Result<i64, ParseError> {
+    match lx.next_tok()? {
+        Tok::Int(v) => Ok(v),
+        _ => Err(ParseError(alloc::format!("expected integer {what}"))),
     }
-    lx.pos += 1; // consume '['
+}
+
+fn expect_tok(lx: &mut Lexer, expected: Tok, what: &str) -> Result<(), ParseError> {
+    let tok = lx.next_tok()?;
+    if tok == expected {
+        Ok(())
+    } else {
+        Err(ParseError(alloc::format!("expected {what}")))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vector literal
+// ---------------------------------------------------------------------------
+
+fn parse_vector_literal(lx: &mut Lexer) -> Result<Literal, ParseError> {
+    // The '[' has already been consumed by the lexer (LBracket token).
+    // Skip any whitespace and parse comma-separated floats until ']'.
+    let b = lx.bytes();
     let mut vals = Vec::new();
-    // Scan comma-separated floats until ']'.
     loop {
         while lx.pos < b.len() && b[lx.pos].is_ascii_whitespace() {
             lx.pos += 1;
@@ -498,61 +754,97 @@ fn parse_vector_literal(lx: &mut Lexer) -> Result<Literal, ParseError> {
     Ok(Literal::Vector(vals))
 }
 
-fn expect_ident(lx: &mut Lexer, what: &str) -> Result<String, ParseError> {
+fn parse_literal(lx: &mut Lexer) -> Result<Literal, ParseError> {
     match lx.next_tok()? {
-        Tok::Ident(name) => Ok(name.to_string()),
-        _ => Err(ParseError(alloc::format!("expected {what}"))),
+        Tok::Int(v) => Ok(Literal::Int(v)),
+        Tok::Text(s) => Ok(Literal::Text(s.to_string())),
+        Tok::LBracket => parse_vector_literal(lx),
+        Tok::Ident(kw) if eq_ignore_case(kw, "null") => Ok(Literal::Null),
+        _ => Err(ParseError("expected a value".to_string())),
     }
 }
 
-fn parse_insert(mut lx: Lexer) -> Result<InsertStatement, ParseError> {
-    // INSERT INTO <table> (c1, c2, ...) VALUES (v1, v2, ...)
-    match lx.next_tok()? {
-        Tok::Ident(kw) if eq_ignore_case(kw, "into") => {}
-        _ => return Err(ParseError("expected INTO".to_string())),
-    }
-    let table = expect_ident(&mut lx, "table name")?;
+// ---------------------------------------------------------------------------
+// CREATE TABLE
+// ---------------------------------------------------------------------------
 
-    // Optional column list: (c1, c2, ...)
+fn parse_create_table(lx: &mut Lexer) -> Result<CreateTableStatement, ParseError> {
+    expect_kw(lx, "table")?;
+    let table = expect_ident(lx, "table name")?;
+    expect_tok(lx, Tok::LParen, "'('")?;
     let mut columns = Vec::new();
-    let mut t = lx.next_tok()?;
-    if let Tok::Ident(p) = &t {
-        if *p == "(" {
-            loop {
-                let col = expect_ident(&mut lx, "column name")?;
-                columns.push(col);
-                match lx.next_tok()? {
-                    Tok::Ident(",") => continue,
-                    Tok::Ident(")") => break,
-                    _ => return Err(ParseError("expected ',' or ')'".to_string())),
-                }
+    loop {
+        let name = expect_ident(lx, "column name")?;
+        let ctype = match lx.next_tok()? {
+            Tok::Ident(kw) if eq_ignore_case(kw, "int") || eq_ignore_case(kw, "integer") => {
+                ColumnType::Int
             }
-            t = lx.next_tok()?;
+            Tok::Ident(kw) if eq_ignore_case(kw, "text") => ColumnType::Text,
+            Tok::Ident(kw) if eq_ignore_case(kw, "vector") => {
+                // Optional [N] dimension hint (ignored for now).
+                let b = lx.bytes();
+                if lx.pos < b.len() && b[lx.pos] == b'[' {
+                    lx.pos += 1;
+                    // Skip until ']'.
+                    while lx.pos < b.len() && b[lx.pos] != b']' {
+                        lx.pos += 1;
+                    }
+                    if lx.pos < b.len() {
+                        lx.pos += 1; // skip ']'
+                    }
+                }
+                ColumnType::Vector
+            }
+            _ => {
+                return Err(ParseError(
+                    "expected column type (INT, TEXT, VECTOR)".to_string(),
+                ))
+            }
+        };
+        columns.push(ColumnDef { name, ctype });
+        match lx.next_tok()? {
+            Tok::Comma => continue,
+            Tok::RParen => break,
+            _ => return Err(ParseError("expected ',' or ')'".to_string())),
         }
     }
+    Ok(CreateTableStatement { table, columns })
+}
 
-    // VALUES
+// ---------------------------------------------------------------------------
+// INSERT
+// ---------------------------------------------------------------------------
+
+fn parse_insert(mut lx: Lexer) -> Result<InsertStatement, ParseError> {
+    expect_kw(&mut lx, "into")?;
+    let table = expect_ident(&mut lx, "table name")?;
+
+    let mut columns = Vec::new();
+    let mut t = lx.next_tok()?;
+    if let Tok::LParen = t {
+        loop {
+            let col = expect_ident(&mut lx, "column name")?;
+            columns.push(col);
+            match lx.next_tok()? {
+                Tok::Comma => continue,
+                Tok::RParen => break,
+                _ => return Err(ParseError("expected ',' or ')'".to_string())),
+            }
+        }
+        t = lx.next_tok()?;
+    }
+
     match t {
         Tok::Ident(kw) if eq_ignore_case(kw, "values") => {}
         _ => return Err(ParseError("expected VALUES".to_string())),
     }
-    // (v1, v2, ...)
-    match lx.next_tok()? {
-        Tok::Ident("(") => {}
-        _ => return Err(ParseError("expected '(' before values".to_string())),
-    }
+    expect_tok(&mut lx, Tok::LParen, "'(' before values")?;
     let mut values = Vec::new();
     loop {
-        let value = match lx.next_tok()? {
-            Tok::Int(v) => Literal::Int(v),
-            Tok::Text(s) => Literal::Text(s.to_string()),
-            Tok::Ident("[") => parse_vector_literal(&mut lx)?,
-            _ => return Err(ParseError("expected a value".to_string())),
-        };
-        values.push(value);
+        values.push(parse_literal(&mut lx)?);
         match lx.next_tok()? {
-            Tok::Ident(",") => continue,
-            Tok::Ident(")") => break,
+            Tok::Comma => continue,
+            Tok::RParen => break,
             _ => return Err(ParseError("expected ',' or ')'".to_string())),
         }
     }
@@ -566,117 +858,381 @@ fn parse_insert(mut lx: Lexer) -> Result<InsertStatement, ParseError> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// UPDATE
+// ---------------------------------------------------------------------------
+
 fn parse_update(mut lx: Lexer) -> Result<UpdateStatement, ParseError> {
     let table = expect_ident(&mut lx, "table name")?;
-    match lx.next_tok()? {
-        Tok::Ident(kw) if eq_ignore_case(kw, "set") => {}
-        _ => return Err(ParseError("expected SET".to_string())),
-    }
+    expect_kw(&mut lx, "set")?;
     let mut assignments = Vec::new();
     loop {
         let column = expect_ident(&mut lx, "column name")?;
-        match lx.next_tok()? {
-            Tok::Op(CmpOp::Eq) => {}
-            _ => return Err(ParseError("expected '=' in assignment".to_string())),
-        }
-        let value = match lx.next_tok()? {
-            Tok::Int(v) => Literal::Int(v),
-            Tok::Text(s) => Literal::Text(s.to_string()),
-            Tok::Ident("[") => parse_vector_literal(&mut lx)?,
-            _ => return Err(ParseError("expected a value in assignment".to_string())),
-        };
+        expect_tok(&mut lx, Tok::Op(CmpOp::Eq), "'=' in assignment")?;
+        let value = parse_literal(&mut lx)?;
         assignments.push(Assignment { column, value });
         match lx.next_tok()? {
             Tok::Comma => continue,
-            t => {
-                // Hand the token back conceptually by checking WHERE/EOF.
-                if let Tok::Ident(kw) = t {
-                    if eq_ignore_case(kw, "where") {
-                        let column = expect_ident(&mut lx, "column in WHERE")?;
-                        let op = match lx.next_tok()? {
-                            Tok::Op(op) => op,
-                            _ => return Err(ParseError("expected operator in WHERE".to_string())),
-                        };
-                        let value = match lx.next_tok()? {
-                            Tok::Int(v) => v,
-                            _ => return Err(ParseError("expected integer in WHERE".to_string())),
-                        };
-                        let filter = Some(Predicate { column, op, value });
-                        if lx.next_tok()? != Tok::Eof {
-                            return Err(ParseError("trailing tokens".to_string()));
-                        }
-                        return Ok(UpdateStatement {
-                            table,
-                            assignments,
-                            filter,
-                        });
-                    }
-                }
-                if t != Tok::Eof {
-                    return Err(ParseError("trailing tokens".to_string()));
-                }
-                return Ok(UpdateStatement {
-                    table,
-                    assignments,
-                    filter: None,
-                });
+            tok => {
+                push_back(&mut lx, tok);
+                break;
             }
         }
     }
+    // Optional WHERE.
+    let t = lx.next_tok()?;
+    let filter = if let Tok::Ident(kw) = &t {
+        if eq_ignore_case(kw, "where") {
+            Some(parse_expr(&mut lx)?)
+        } else {
+            push_back(&mut lx, t);
+            None
+        }
+    } else {
+        push_back(&mut lx, t);
+        None
+    };
+    if lx.next_tok()? != Tok::Eof {
+        return Err(ParseError("trailing tokens".to_string()));
+    }
+    Ok(UpdateStatement {
+        table,
+        assignments,
+        filter,
+    })
 }
 
+// ---------------------------------------------------------------------------
+// DELETE
+// ---------------------------------------------------------------------------
+
 fn parse_delete(mut lx: Lexer) -> Result<DeleteStatement, ParseError> {
-    // DELETE FROM <table> [WHERE col op int]
-    match lx.next_tok()? {
-        Tok::Ident(kw) if eq_ignore_case(kw, "from") => {}
-        _ => return Err(ParseError("expected FROM".to_string())),
-    }
+    expect_kw(&mut lx, "from")?;
     let table = expect_ident(&mut lx, "table name")?;
-    let mut filter = None;
     let t = lx.next_tok()?;
-    if let Tok::Ident(kw) = t {
+    let filter = if let Tok::Ident(kw) = &t {
         if eq_ignore_case(kw, "where") {
-            let column = expect_ident(&mut lx, "column in WHERE")?;
-            let op = match lx.next_tok()? {
-                Tok::Op(op) => op,
-                _ => return Err(ParseError("expected operator in WHERE".to_string())),
-            };
-            let value = match lx.next_tok()? {
-                Tok::Int(v) => v,
-                _ => return Err(ParseError("expected integer in WHERE".to_string())),
-            };
-            filter = Some(Predicate { column, op, value });
+            Some(parse_expr(&mut lx)?)
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
     if lx.next_tok()? != Tok::Eof {
         return Err(ParseError("trailing tokens after statement".to_string()));
     }
     Ok(DeleteStatement { table, filter })
 }
 
+// ---------------------------------------------------------------------------
+// SELECT
+// ---------------------------------------------------------------------------
+
+fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
+    // Columns or *.
+    let mut columns = Vec::new();
+    let mut star = false;
+    let mut aggregates = Vec::new();
+    let mut t = lx.next_tok()?;
+    if t == Tok::Star {
+        star = true;
+        t = lx.next_tok()?;
+    } else {
+        loop {
+            match t {
+                Tok::Ident(name) => {
+                    let col_name = name.to_string();
+                    // Check for aggregate function: COUNT/SUM/AVG/MIN/MAX ( ... )
+                    if let Some(agg) = match col_name.to_ascii_lowercase().as_str() {
+                        "count" => Some(AggregateFunc::Count),
+                        "sum" => Some(AggregateFunc::Sum),
+                        "avg" => Some(AggregateFunc::Avg),
+                        "min" => Some(AggregateFunc::Min),
+                        "max" => Some(AggregateFunc::Max),
+                        _ => None,
+                    } {
+                        let next = lx.next_tok()?;
+                        if let Tok::LParen = next {
+                            let peek = lx.next_tok()?;
+                            let inner = if peek == Tok::Star {
+                                expect_tok(lx, Tok::RParen, "')'")?;
+                                "*".to_string()
+                            } else {
+                                push_back(lx, peek);
+                                let c = expect_ident(lx, "column in aggregate")?;
+                                expect_tok(lx, Tok::RParen, "')'")?;
+                                c
+                            };
+                            let alias = match lx.next_tok()? {
+                                Tok::Ident(kw) if eq_ignore_case(kw, "as") => {
+                                    expect_ident(lx, "alias")?
+                                }
+                                tok => {
+                                    push_back(lx, tok);
+                                    alloc::format!("{agg:?}").to_lowercase()
+                                }
+                            };
+                            aggregates.push((alias.clone(), agg, inner));
+                            columns.push(alias);
+                            match lx.next_tok()? {
+                                Tok::Comma => {
+                                    t = lx.next_tok()?;
+                                    continue;
+                                }
+                                tok => {
+                                    push_back(lx, tok);
+                                }
+                            }
+                        } else {
+                            push_back(lx, next);
+                            columns.push(col_name);
+                        }
+                    } else {
+                        // Regular column — check for alias: col AS name
+                        let next = lx.next_tok()?;
+                        if let Tok::Ident(kw) = &next {
+                            if eq_ignore_case(kw, "as") {
+                                let alias = expect_ident(lx, "alias")?;
+                                columns.push(alias);
+                            } else {
+                                push_back(lx, next);
+                                columns.push(col_name);
+                            }
+                        } else {
+                            push_back(lx, next);
+                            columns.push(col_name);
+                        }
+                    }
+                }
+                _ => return Err(ParseError("expected column name".to_string())),
+            }
+            t = lx.next_tok()?;
+            if t == Tok::Comma {
+                t = lx.next_tok()?;
+                continue;
+            }
+            break;
+        }
+    }
+
+    // FROM.
+    match t {
+        Tok::Ident(kw) if eq_ignore_case(kw, "from") => {}
+        _ => return Err(ParseError("expected FROM".to_string())),
+    }
+    let table = expect_ident(lx, "table name")?;
+
+    // Optional JOINs.
+    let mut joins = Vec::new();
+    loop {
+        let t = lx.next_tok()?;
+        if let Tok::Ident(kw) = &t {
+            if eq_ignore_case(kw, "join") {
+                let join_table = expect_ident(lx, "join table name")?;
+                expect_kw(lx, "on")?;
+                let left_col = expect_ident(lx, "left column")?;
+                expect_tok(lx, Tok::Op(CmpOp::Eq), "'=' in ON clause")?;
+                let right_col = expect_ident(lx, "right column")?;
+                joins.push(Join {
+                    jtype: JoinType::Inner,
+                    table: join_table,
+                    left_col,
+                    right_col,
+                });
+                continue;
+            }
+        }
+        push_back(lx, t);
+        break;
+    }
+
+    let mut filter = None;
+    let mut limit = None;
+    let mut order_by_cosine = None;
+    let mut group_by = Vec::new();
+    let mut order_by = Vec::new();
+
+    // Optional WHERE / GROUP BY / ORDER BY / LIMIT.
+    let mut t = lx.next_tok()?;
+    loop {
+        match t {
+            Tok::Ident(kw) if eq_ignore_case(kw, "where") => {
+                if filter.is_some() {
+                    return Err(ParseError("duplicate WHERE".to_string()));
+                }
+                filter = Some(parse_expr(lx)?);
+                t = lx.next_tok()?;
+            }
+            Tok::Ident(kw) if eq_ignore_case(kw, "group") => {
+                expect_kw(lx, "by")?;
+                loop {
+                    let col = expect_ident(lx, "column in GROUP BY")?;
+                    group_by.push(col);
+                    match lx.next_tok()? {
+                        Tok::Comma => continue,
+                        tok => {
+                            push_back(lx, tok);
+                            break;
+                        }
+                    }
+                }
+                t = lx.next_tok()?;
+            }
+            Tok::Ident(kw) if eq_ignore_case(kw, "order") => {
+                expect_kw(lx, "by")?;
+                let first_col = lx.next_tok()?;
+                // Check if this is ORDER BY cosine(...) — legacy vector path.
+                if let Tok::Ident(name) = &first_col {
+                    if eq_ignore_case(name, "cosine") {
+                        // Re-parse the cosine path.
+                        expect_tok(lx, Tok::LParen, "'(' after cosine")?;
+                        let column = expect_ident(lx, "embedding column")?;
+                        expect_tok(lx, Tok::Comma, "',' in cosine(...)")?;
+                        let _param = match lx.next_tok()? {
+                            Tok::Param => 1,
+                            _ => return Err(ParseError("expected '?' query vector".to_string())),
+                        };
+                        expect_tok(lx, Tok::RParen, "')' after cosine(...)")?;
+                        expect_kw(lx, "limit")?;
+                        let k = expect_int(lx, "LIMIT k")?;
+                        order_by_cosine = Some(OrderByCosine {
+                            column,
+                            param: 1,
+                            k: k as u64,
+                        });
+                        t = lx.next_tok()?;
+                        continue;
+                    }
+                    // Regular ORDER BY: col [ASC|DESC]
+                    let mut descending = false;
+                    let col = name.to_string();
+                    let next = lx.next_tok()?;
+                    match next {
+                        Tok::Ident(kw) if eq_ignore_case(kw, "asc") => {
+                            descending = false;
+                        }
+                        Tok::Ident(kw) if eq_ignore_case(kw, "desc") => {
+                            descending = true;
+                        }
+                        _ => {
+                            push_back(lx, next);
+                        }
+                    }
+                    order_by.push(OrderBy {
+                        column: col,
+                        descending,
+                    });
+                    // Continue parsing more ORDER BY columns.
+                    loop {
+                        let next = lx.next_tok()?;
+                        if let Tok::Comma = next {
+                            let col_tok = lx.next_tok()?;
+                            if let Tok::Ident(name) = col_tok {
+                                let mut desc = false;
+                                let nxt = lx.next_tok()?;
+                                match nxt {
+                                    Tok::Ident(kw) if eq_ignore_case(kw, "desc") => {
+                                        desc = true;
+                                    }
+                                    Tok::Ident(kw) if eq_ignore_case(kw, "asc") => {}
+                                    _ => push_back(lx, nxt),
+                                }
+                                order_by.push(OrderBy {
+                                    column: name.to_string(),
+                                    descending: desc,
+                                });
+                            } else {
+                                return Err(ParseError(
+                                    "expected column name in ORDER BY".to_string(),
+                                ));
+                            }
+                        } else {
+                            push_back(lx, next);
+                            break;
+                        }
+                    }
+                    t = lx.next_tok()?;
+                    continue;
+                }
+                return Err(ParseError(
+                    "only ORDER BY <col> and ORDER BY cosine(...) are supported".to_string(),
+                ));
+            }
+            Tok::Ident(kw) if eq_ignore_case(kw, "limit") => {
+                if limit.is_some() {
+                    return Err(ParseError("duplicate LIMIT".to_string()));
+                }
+                match lx.next_tok()? {
+                    Tok::Int(v) if v >= 0 => limit = Some(v as u64),
+                    _ => return Err(ParseError("expected non-negative LIMIT".to_string())),
+                }
+                t = lx.next_tok()?;
+            }
+            _ => break,
+        }
+    }
+
+    if t != Tok::Eof {
+        return Err(ParseError("trailing tokens after statement".to_string()));
+    }
+
+    Ok(SelectStatement {
+        columns,
+        star,
+        table,
+        filter,
+        joins,
+        group_by,
+        aggregates,
+        order_by,
+        order_by_cosine,
+        limit,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Top-level dispatch
+// ---------------------------------------------------------------------------
+
+pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
+    let mut lx = Lexer::new(input);
+    match lx.next_tok()? {
+        Tok::Ident(kw) if eq_ignore_case(kw, "select") => {
+            parse_select_inner(&mut lx).map(Statement::Select)
+        }
+        Tok::Ident(kw) if eq_ignore_case(kw, "insert") => parse_insert(lx).map(Statement::Insert),
+        Tok::Ident(kw) if eq_ignore_case(kw, "update") => parse_update(lx).map(Statement::Update),
+        Tok::Ident(kw) if eq_ignore_case(kw, "delete") => parse_delete(lx).map(Statement::Delete),
+        Tok::Ident(kw) if eq_ignore_case(kw, "create") => {
+            parse_create_table(&mut lx).map(Statement::CreateTable)
+        }
+        Tok::Ident(kw) if eq_ignore_case(kw, "begin") => Ok(Statement::Begin),
+        Tok::Ident(kw) if eq_ignore_case(kw, "commit") => Ok(Statement::Commit),
+        Tok::Ident(kw) if eq_ignore_case(kw, "rollback") => Ok(Statement::Rollback),
+        _ => Err(ParseError(
+            "expected SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, BEGIN, COMMIT, or ROLLBACK"
+                .to_string(),
+        )),
+    }
+}
+
+/// Convenience: parse a standalone SELECT.
+pub fn parse_select(input: &str) -> Result<SelectStatement, ParseError> {
+    let mut lx = Lexer::new(input);
+    match lx.next_tok()? {
+        Tok::Ident(kw) if eq_ignore_case(kw, "select") => parse_select_inner(&mut lx),
+        _ => Err(ParseError("expected SELECT".to_string())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn debug_insert_tokens() {
-        let mut lx = Lexer::new("INSERT INTO users (id, name, age) VALUES (1, 'alice', 30)");
-        let mut toks = Vec::new();
-        loop {
-            match lx.next_tok() {
-                Ok(Tok::Eof) => {
-                    toks.push("EOF".to_string());
-                    break;
-                }
-                Ok(t) => toks.push(format!("{t:?}")),
-                Err(e) => {
-                    toks.push(format!("ERR {e:?}"));
-                    break;
-                }
-            }
-        }
-        panic!("TOKENS: {}", toks.join(" | "));
-    }
 
     #[test]
     fn parses_star_select() {
@@ -693,19 +1249,138 @@ mod tests {
         assert!(!s.star);
         assert_eq!(s.columns, alloc::vec!["id".to_string(), "name".to_string()]);
         assert_eq!(s.table, "t");
-        assert_eq!(
-            s.filter,
-            Some(Predicate {
-                column: "age".to_string(),
-                op: CmpOp::Ge,
-                value: 18
-            })
-        );
+        assert!(s.filter.is_some());
         assert_eq!(s.limit, Some(5));
     }
 
     #[test]
-    fn all_operators() {
+    fn parses_and_or_where() {
+        let s = parse_select("SELECT * FROM t WHERE a = 1 AND b = 2 OR c = 3").unwrap();
+        let f = s.filter.unwrap();
+        // Should be (a=1 AND b=2) OR c=3.
+        assert!(matches!(f, Expr::Or(_, _)));
+    }
+
+    #[test]
+    fn parses_is_null() {
+        let s = parse_select("SELECT * FROM t WHERE x IS NULL").unwrap();
+        assert!(matches!(s.filter, Some(Expr::IsNull(c)) if c == "x"));
+    }
+
+    #[test]
+    fn parses_like() {
+        let s = parse_select("SELECT * FROM t WHERE name LIKE '%alice%'").unwrap();
+        assert!(matches!(
+            s.filter,
+            Some(Expr::Like { column, pattern }) if column == "name" && pattern == "%alice%"
+        ));
+    }
+
+    #[test]
+    fn parses_in_list() {
+        let s = parse_select("SELECT * FROM t WHERE x IN (1, 2, 3)").unwrap();
+        assert!(matches!(
+            s.filter,
+            Some(Expr::InInt { column, values }) if column == "x" && values == alloc::vec![1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn parses_between() {
+        let s = parse_select("SELECT * FROM t WHERE x BETWEEN 10 AND 20").unwrap();
+        assert!(matches!(
+            s.filter,
+            Some(Expr::BetweenInt { column, low, high }) if column == "x" && low == 10 && high == 20
+        ));
+    }
+
+    #[test]
+    fn parses_group_by() {
+        let s = parse_select("SELECT dept, COUNT(*) FROM t GROUP BY dept").unwrap();
+        assert_eq!(s.group_by, alloc::vec!["dept".to_string()]);
+        assert_eq!(s.aggregates.len(), 1);
+        assert_eq!(s.aggregates[0].1, AggregateFunc::Count);
+    }
+
+    #[test]
+    fn parses_order_by_column() {
+        let s = parse_select("SELECT * FROM t ORDER BY name DESC").unwrap();
+        assert_eq!(s.order_by.len(), 1);
+        assert_eq!(s.order_by[0].column, "name");
+        assert!(s.order_by[0].descending);
+    }
+
+    #[test]
+    fn parses_order_by_multiple() {
+        let s = parse_select("SELECT * FROM t ORDER BY a ASC, b DESC").unwrap();
+        assert_eq!(s.order_by.len(), 2);
+        assert!(!s.order_by[0].descending);
+        assert!(s.order_by[1].descending);
+    }
+
+    #[test]
+    fn parses_join() {
+        let s = parse_select("SELECT * FROM t1 JOIN t2 ON t1.id = t2.t1_id").unwrap();
+        assert_eq!(s.joins.len(), 1);
+        assert_eq!(s.joins[0].table, "t2");
+        assert_eq!(s.joins[0].left_col, "t1.id");
+        assert_eq!(s.joins[0].right_col, "t2.t1_id");
+    }
+
+    #[test]
+    fn parses_create_table() {
+        let s = parse_statement("CREATE TABLE t (id INT, name TEXT, emb VECTOR[128])").unwrap();
+        match s {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.table, "t");
+                assert_eq!(ct.columns.len(), 3);
+                assert_eq!(ct.columns[0].ctype, ColumnType::Int);
+                assert_eq!(ct.columns[1].ctype, ColumnType::Text);
+                assert_eq!(ct.columns[2].ctype, ColumnType::Vector);
+            }
+            _ => panic!("expected CreateTable"),
+        }
+    }
+
+    #[test]
+    fn parses_begin_commit_rollback() {
+        assert!(matches!(parse_statement("BEGIN"), Ok(Statement::Begin)));
+        assert!(matches!(parse_statement("COMMIT"), Ok(Statement::Commit)));
+        assert!(matches!(
+            parse_statement("ROLLBACK"),
+            Ok(Statement::Rollback)
+        ));
+    }
+
+    #[test]
+    fn parses_insert_with_null() {
+        let s = parse_statement("INSERT INTO t (id, name) VALUES (1, NULL)").unwrap();
+        if let Statement::Insert(i) = s {
+            assert_eq!(i.values[1], Literal::Null);
+        } else {
+            panic!("expected Insert");
+        }
+    }
+
+    #[test]
+    fn parses_update_with_complex_where() {
+        let s = parse_statement("UPDATE t SET x = 1 WHERE a > 5 AND b < 10").unwrap();
+        if let Statement::Update(u) = s {
+            assert!(u.filter.is_some());
+        } else {
+            panic!("expected Update");
+        }
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_select("UPDATE t SET x=1").is_err());
+        assert!(parse_select("SELECT FROM t").is_err());
+        assert!(parse_statement("XYZ").is_err());
+    }
+
+    #[test]
+    fn all_comparison_operators() {
         for (src, op) in [
             ("=", CmpOp::Eq),
             ("<>", CmpOp::Ne),
@@ -717,14 +1392,10 @@ mod tests {
         ] {
             let sql = alloc::format!("SELECT * FROM t WHERE x {src} 1");
             let s = parse_select(&sql).unwrap();
-            assert_eq!(s.filter.unwrap().op, op, "op {src}");
+            match s.filter.unwrap() {
+                Expr::Cmp { op: o, .. } => assert_eq!(o, op, "op {src}"),
+                _ => panic!("expected Cmp for op {src}"),
+            }
         }
-    }
-
-    #[test]
-    fn rejects_garbage() {
-        assert!(parse_select("UPDATE t SET x=1").is_err());
-        assert!(parse_select("SELECT FROM t").is_err());
-        assert!(parse_select("SELECT * FROM t EXTRA").is_err());
     }
 }

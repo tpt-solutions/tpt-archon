@@ -53,3 +53,65 @@ jobs:
         run: cargo test -p tpt-archon-verify
         working-directory: crates/tpt-archon-verify
 
+  deny:
+    name: Supply-chain audit (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  msrv:
+    name: MSRV compatibility (1.74)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.74
+      - uses: Swatinem/rust-cache@v2
+      - name: Build workspace with MSRV
+        run: cargo check --workspace
+      - name: Build core no_std with MSRV
+        run: cargo check -p tpt-archon-core --no-default-features
+
+  coverage:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+      - name: Generate coverage
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: lcov.info
+
+  no-std:
+    name: no_std embedded target (compile-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - name: Build core for embedded target
+        run: cargo build -p tpt-archon-core --no-default-features --target thumbv7em-none-eabihf
+
+  wasm:
+    name: WASM build (compile-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build full stack for WASM
+        run: cargo check -p tpt-archon-relational --no-default-features --target wasm32-unknown-unknown
+

@@ -131,7 +131,7 @@ Purpose: An AI-native, GPU-accelerated relational database engine that runs as a
 Key Components:
 SQL Parser
 Hand-written, zero-allocation parser using tpt-zero-bytes
-Supports PostgreSQL-compatible SQL dialect
+PostgreSQL-inspired SQL dialect (SELECT/WHERE/JOIN/GROUP BY/ORDER BY/INSERT/UPDATE/DELETE/CREATE TABLE/BEGIN/COMMIT/ROLLBACK); no subqueries, CTEs, views, or ALTER TABLE yet
 Extensible for custom types and operators
 Query Planner & Optimizer
 Cost-based optimizer with statistics collection
@@ -249,7 +249,7 @@ Month 5: Build capability-based IPC system
 Month 6: Integrate unified page cache (kernel + storage share memory)
 Deliverable: tpt-archon-kernel and tpt-archon-bridge crates.
 Phase 3: Relational Engine (Months 7-12)
-Goal: Build a PostgreSQL-compatible, GPU-accelerated query engine.
+Goal: Build a PostgreSQL-inspired, GPU-accelerated query engine.
 Milestones:
 Month 7-8: Implement SQL parser and basic query execution
 Month 9-10: Build MVCC with serializable isolation
@@ -267,13 +267,13 @@ Zero silent data corruption: Mathematical proof of crash consistency
 Zero race conditions: Capability-based IPC prevents data races
 Developer Experience
 Single binary: Storage, kernel, and database compile to one executable
-PostgreSQL-compatible: Drop-in replacement for most PostgreSQL workloads
+PostgreSQL-inspired: Core SQL surface (SELECT, JOIN, GROUP BY, ORDER BY, aggregates, transactions) follows PostgreSQL syntax; no full drop-in replacement yet
 SQLite-compatible: Can be embedded in applications like SQLite
 Risk Mitigation
 Risk 1: Microkernel Complexity
 Mitigation: Start with a user-space implementation (running on Linux) before attempting bare-metal. This allows us to validate the architecture without writing hardware drivers.
 Risk 2: SQL Compatibility
-Mitigation: Focus on PostgreSQL compatibility first (most widely used). SQLite compatibility can be added later as a separate compatibility layer.
+Mitigation: Focus on PostgreSQL syntax for core SQL first (most widely used). SQLite compatibility can be added later as a separate compatibility layer.
 Risk 3: Formal Verification Overhead
 Mitigation: Only verify critical invariants (WAL, MVCC, scheduler). Use tpt-eidos for compile-time checks where possible (cheaper than full formal verification).
 Conclusion

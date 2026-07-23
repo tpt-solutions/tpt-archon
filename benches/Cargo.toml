@@ -9,12 +9,17 @@ publish = false
 # against PostgreSQL/SQLite/pgvector from `spec.txt` live here; numbers are
 # measured, never assumed.
 
+[features]
+default = []
+sqlite-bench = ["dep:rusqlite"]
+pgvector-bench = ["dep:postgres"]
+
 [dependencies]
 tpt-archon-core = { path = "../crates/tpt-archon-core" }
 tpt-archon-relational = { path = "../crates/tpt-archon-relational" }
-
-[dev-dependencies]
 criterion = "0.5"
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+postgres = { version = "0.19", optional = true }
 
 [[bench]]
 name = "storage"
@@ -22,4 +27,8 @@ harness = false
 
 [[bench]]
 name = "query"
+harness = false
+
+[[bench]]
+name = "vector_compare"
 harness = false

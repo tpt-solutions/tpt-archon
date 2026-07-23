@@ -199,3 +199,43 @@ Ordered de-risk-first; trust fixes are done, correctness/adoption tasks remain.
 - [ ] `no_std` + `alloc`-only embedded CI target (compile-only, e.g. `cortex-m`) to prove the embeddable claim (needs a cross target/toolchain in CI; core is `no_std`-clean by construction but the target build is not wired into `ci.yml` yet).
 - [x] `docs/GETTING_STARTED.md` + per-crate "What this crate is NOT (yet)" lines (ADR 0003 honesty) (`docs/GETTING_STARTED.md`).
 - [x] `cargo generate` template (`template/`) scaffolding a `Database::open` + INSERT/SELECT app — highest-leverage adoption move.
+
+---
+
+## Phase 5 — Platform review follow-ups (2026-07-21)
+
+Handover from a full-platform review (bugs, SQL-surface gaps, adoption friction,
+CI automation, differentiation ideas). Ordered de-risk-first.
+
+### 5.1 Bugs / correctness
+- [x] Replace the non-test `.unwrap()` in `run_update` (`crates/tpt-archon-relational/src/database.rs:253`, `self.tree.get(id).unwrap()`) with proper error handling — safe only under the current single-writer assumption; becomes a real panic risk the moment concurrent UPDATE/DELETE or async execution is introduced.
+- [x] Add a checksum/validation layer before `decode_row` (`crates/tpt-archon-relational/src/database.rs:192-242`) so corrupted bytes surfaced from the B-Link tree fail gracefully instead of panicking on raw unchecked slice indexing.
+- [ ] Revisit `BufferPool::flush_all` (`crates/tpt-archon-core/src/page.rs:280-308`) flushing `Pinned` frames with `dirty_intent` set — currently documented as intentional (ADR-style), but consider whether callers need a commit-scoped flush variant now that `StorageEngine` is the recommended write path.
+
+### 5.2 SQL surface gap (vs. "PostgreSQL-compatible" claim in spec.txt)
+- [x] Multi-predicate `WHERE` support (`AND`/`OR`) — smallest-effort, highest-impact grammar change; turn `Predicate` (`crates/tpt-archon-relational/src/parser.rs:36-43`) into a boolean expression tree.
+- [x] `LIKE`, `IN`, `BETWEEN`, `IS NULL` predicate operators.
+- [x] `CREATE TABLE` SQL DDL (schema is currently Rust-API-only via `Schema`, `crates/tpt-archon-relational/src/database.rs:37-44`).
+- [x] JOINs (start with inner join over two tables).
+- [x] `GROUP BY` + aggregates (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`).
+- [x] General `ORDER BY` on arbitrary columns (today only the special-cased `ORDER BY cosine(...)` path exists).
+- [x] Expose SQL-level transactions (`BEGIN`/`COMMIT`/`ROLLBACK`) over the MVCC engine that already exists in `mvcc.rs` but isn't reachable from parsed SQL.
+- [ ] Reconcile `spec.txt`'s "PostgreSQL-compatible SQL dialect" / "drop-in replacement" language with actual grammar coverage, or scope the claim down until the above land — avoid repeating the marketing-ahead-of-reality pattern already flagged for zero-CVE claims in ADR 0003.
+
+### 5.3 Adoption — interactive entry point
+- [x] `archon-sql` REPL binary (first `[[bin]]` target in the workspace — none exists today) wrapping `relational::database::Database` so newcomers can run SQL interactively instead of only via `cargo run --example` or writing Rust.
+- [ ] Single-binary/Docker demo image built on the REPL, for a zero-install "try it" path.
+- [x] Top-level "which crate do I start with" quick-start pointer in the root `README.md` (today a newcomer has to read all four crate READMEs/ADRs to learn `tpt-archon-relational` is the SQL entry point).
+
+### 5.4 CI / supply-chain automation
+- [x] Dependabot config under `.github/` (none exists today).
+- [x] `cargo-deny` security-licensing CI job.
+- [x] MSRV CI check — `template/Cargo.toml` declares `rust-version = "1.74"` but no workflow builds/tests against it; CI only runs on `stable`.
+- [x] Code coverage job (`cargo-llvm-cov`).
+- [x] `no_std` + `alloc`-only embedded CI target (compile-only, `thumbv7em-none-eabihf`) — carried over from 4.4, now wired into `ci.yml`.
+
+### 5.5 Differentiation / innovative additions
+- [x] Ship the `archon-sql` REPL (5.3) as the vehicle for demoing vector search live (`ORDER BY cosine(...) LIMIT k`).
+- [ ] Published pgvector benchmark comparison using the existing Criterion scaffold (`benches/benches/query.rs`, `benches/benches/storage.rs`) to back `spec.txt`'s performance claims with measured numbers.
+- [x] WASM playground: `wasm32-unknown-unknown` build of `tpt-archon-core`/`tpt-archon-relational` (core is already `no_std`) + a browser demo — doubles as proof of the embeddability claim ahead of the cortex-m CI target.
+- [x] One-way SQLite `.sqlite` file importer into `Database`/`run_insert` (`crates/tpt-archon-relational/src/database.rs:246-248`) as a low-effort migration bridge — `spec.txt` already flags SQLite compatibility as a deferred phase.

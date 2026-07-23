@@ -66,6 +66,40 @@ There is no `tpt-zero-bytes` crate (referenced in the original design doc but
 never built anywhere in the ecosystem); the zero-allocation I/O primitives
 `tpt-archon-core` needs are implemented directly in that crate instead.
 
+## Quick start
+
+The fastest way to try Archon is the interactive SQL shell:
+
+```sh
+cargo run -p archon-sql
+```
+
+This drops you into a REPL where you can create tables, insert data, and run
+queries:
+
+```sql
+CREATE TABLE users (id INT, name TEXT, age INT);
+INSERT INTO users (id, name, age) VALUES (1, 'alice', 30);
+INSERT INTO users (id, name, age) VALUES (2, 'bob', 25);
+SELECT name, age FROM users WHERE age >= 25 ORDER BY age;
+```
+
+Or run a single statement non-interactively:
+
+```sh
+cargo run -p archon-sql -e "SELECT 1 + 2;"
+```
+
+**Which crate should I use?**
+
+| What you want | Crate | Example |
+|---|---|---|
+| Embed a database in your app | `tpt-archon-relational` | [`examples/select_end_to_end.rs`](crates/tpt-archon-relational/examples/select_end_to_end.rs) |
+| Use the storage engine directly | `tpt-archon-core` | [`examples/storage_tour.rs`](crates/tpt-archon-core/examples/storage_tour.rs) |
+| Run SQL interactively | `archon-sql` | `cargo run -p archon-sql` |
+| Scaffold a new project | `template/` | `cargo generate --path template` |
+| Formal-verification harness | `tpt-archon-verify` | `cargo test -p tpt-archon-verify` |
+
 ## Build
 
 ```sh

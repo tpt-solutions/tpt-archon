@@ -5,6 +5,7 @@ members = [
     "crates/tpt-archon-bridge",
     "crates/tpt-archon-kernel",
     "crates/tpt-archon-relational",
+    "crates/archon-sql",
 ]
 # Benchmarks live in their own crate so Criterion is only built when explicitly
 # running `cargo bench` from `benches/`, keeping the main workspace lean.
