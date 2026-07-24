@@ -39,7 +39,7 @@ executor, MVCC, GPU acceleration).
 These are verification/tooling deps, **not** runtime deps. None of them are
 pulled into the shippable crates (which must stay `cargo publish`-dry-run
 clean — crates.io rejects git deps even in dev-deps). They live exclusively in
-the non-published `crates/tpt-archon-verify` harness.
+the non-published `crates/out-archon-verify` harness.
 - `tpt-eidos-verifier` — QF_LRA decision procedure; proves the B-Link tree
   node-capacity invariant (node fits the page). The bare `tpt-eidos` repo holds
   it (there is **no** `tpt-eidos-kernel` crate).

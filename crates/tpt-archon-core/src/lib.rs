@@ -14,6 +14,13 @@
 //!   replay.
 //! - [`btree`] — a B-Link tree with point lookups, range scans and concurrent
 //!   inserts.
+//! - [`storage`] — a [`StorageEngine`](storage::StorageEngine) facade wiring
+//!   the buffer pool to the WAL, so page writes actually go through the
+//!   write-ahead log before main storage (not just each piece tested alone).
+//! - [`faultsim`] — a *testing* tool (not a runtime feature): injects
+//!   power-loss-shaped corruption (truncated tails, flipped bytes, zeroed
+//!   records) and asserts [`StorageEngine::recover`](storage::StorageEngine::recover)
+//!   always yields a prefix-consistent state.
 //!
 //! # Zero-allocation, and the missing `tpt-zero-bytes`
 //!

@@ -9,8 +9,8 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 documentation = "https://docs.rs/tpt-archon-bridge"
-keywords.workspace = true
-categories.workspace = true
+keywords = ["ipc", "capabilities", "page-cache", "zero-copy", "no-std"]
+categories = ["no-std", "concurrency", "memory-management"]
 description = "Zero-copy IPC and unified page-cache traits gluing tpt-archon-core storage to the kernel"
 
 [features]

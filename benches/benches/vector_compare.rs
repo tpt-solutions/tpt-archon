@@ -12,19 +12,39 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use tpt_archon_relational::executor::vector_topk;
+use tpt_archon_relational::vector_index::{IvfFlatIndex, DEFAULT_NPROBE};
 
 const DIM: usize = 128;
 const DB_SIZES: &[usize] = &[1_000, 10_000, 100_000];
 const K: usize = 10;
 
-fn make_embeddings(n: usize) -> Vec<Vec<f32>> {
-    (0..n)
-        .map(|i| (0..DIM).map(|d| ((i + d) % 7) as f32).collect())
+/// Deterministic xorshift64* PRNG (no `rand` dependency needed for a
+/// benchmark fixture) producing floats in `[-1.0, 1.0)`.
+fn pseudo_random_vector(seed: u64, dim: usize) -> Vec<f32> {
+    let mut state = seed.wrapping_mul(0x9E3779B97F4A7C15) ^ 0xD1B54A32D192ED03;
+    (0..dim)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0
+        })
         .collect()
 }
 
+/// High-entropy embeddings: real embedding models don't produce the
+/// low-cardinality, short-period vectors a small modular formula would, and
+/// an ANN index's speedup over brute force is sensitive to how separable the
+/// data actually is — a degenerate low-cardinality fixture would flatter
+/// IVFFlat's numbers here well past what it'd deliver on real embeddings.
+fn make_embeddings(n: usize) -> Vec<Vec<f32>> {
+    (0..n).map(|i| pseudo_random_vector(i as u64, DIM)).collect()
+}
+
 fn make_query() -> Vec<f32> {
-    (0..DIM).map(|d| (d % 7) as f32).collect()
+    // A seed disjoint from every row's `i` (0..100_000 across DB_SIZES) so
+    // the query is never accidentally identical to a stored row.
+    pseudo_random_vector(u64::MAX, DIM)
 }
 
 fn brute_force_topk(embeddings: &[Vec<f32>], query: &[f32], k: usize) -> Vec<usize> {
@@ -55,6 +75,19 @@ fn bench_archon(c: &mut Criterion) {
                 b.iter(|| black_box(brute_force_topk(black_box(emb), black_box(&query), K)));
             },
         );
+
+        // IVFFlat: index build is a one-time cost paid outside the timed
+        // closure (same as pgvector, whose `bench_pgvector` never times
+        // `CREATE INDEX` either) — this measures search latency only.
+        let indexed: Vec<(u64, Vec<f32>)> = embeddings
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (i as u64, e.clone()))
+            .collect();
+        let idx = IvfFlatIndex::build(&indexed);
+        group.bench_with_input(BenchmarkId::new("archon_ivfflat", n), &idx, |b, idx| {
+            b.iter(|| black_box(idx.search(black_box(&query), K, DEFAULT_NPROBE)));
+        });
     }
     group.finish();
 }
@@ -85,6 +118,16 @@ fn bench_pgvector(c: &mut Criterion) {
             )
             .unwrap();
 
+        // `$2::vector` makes Postgres infer the parameter's type as `vector`,
+        // which `String`'s `ToSql` impl doesn't accept. `prepare_typed` pins
+        // the parameter to `TEXT` so the cast happens server-side instead.
+        let insert_stmt = client
+            .prepare_typed(
+                "INSERT INTO embeddings (id, emb) VALUES ($1, $2::vector)",
+                &[postgres::types::Type::INT4, postgres::types::Type::TEXT],
+            )
+            .unwrap();
+
         let embeddings = make_embeddings(n);
         let mut tx = client.transaction().unwrap();
         for (i, e) in embeddings.iter().enumerate() {
@@ -96,11 +139,7 @@ fn bench_pgvector(c: &mut Criterion) {
                     .join(",")
             );
             let id: i32 = i as i32;
-            tx.execute(
-                "INSERT INTO embeddings (id, emb) VALUES ($1, $2::vector)",
-                &[&id, &vec_str],
-            )
-            .unwrap();
+            tx.execute(&insert_stmt, &[&id, &vec_str]).unwrap();
         }
         tx.commit().unwrap();
 
@@ -114,13 +153,17 @@ fn bench_pgvector(c: &mut Criterion) {
         );
         let limit: i32 = K as i32;
 
+        let select_stmt = client
+            .prepare_typed(
+                "SELECT id FROM embeddings ORDER BY emb <=> $1::vector LIMIT $2",
+                &[postgres::types::Type::TEXT, postgres::types::Type::INT4],
+            )
+            .unwrap();
+
         group.bench_with_input(BenchmarkId::new("pgvector_l2", n), &n, |b, _| {
             b.iter(|| {
                 let _rows = client
-                    .query(
-                        "SELECT id FROM embeddings ORDER BY emb <=> $1::vector LIMIT $2",
-                        &[&query_vec_str, &limit],
-                    )
+                    .query(&select_stmt, &[&query_vec_str, &limit])
                     .unwrap();
             });
         });
@@ -142,6 +185,18 @@ fn bench_pgvector(c: &mut Criterion) {
                     .collect();
                 black_box(vector_topk(black_box(&emb_col), black_box(&query), K));
             });
+        });
+
+        // Index build is a one-time cost, same as pgvector's `CREATE INDEX`
+        // above (also untimed) — this measures search-only latency.
+        let indexed: Vec<(u64, Vec<f32>)> = embeddings
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (i as u64, e.clone()))
+            .collect();
+        let ivf = IvfFlatIndex::build(&indexed);
+        group.bench_with_input(BenchmarkId::new("archon_ivfflat", n), &n, |b, _| {
+            b.iter(|| black_box(ivf.search(black_box(&query), K, DEFAULT_NPROBE)));
         });
     }
     group.finish();

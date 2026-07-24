@@ -66,6 +66,15 @@ pub enum Expr {
         /// The right-hand value.
         value: Literal,
     },
+    /// A column-to-column comparison: `left_col <op> right_col`.
+    CmpColumn {
+        /// The left-hand column.
+        left: String,
+        /// The comparison operator.
+        op: CmpOp,
+        /// The right-hand column.
+        right: String,
+    },
     /// `column IS [NOT] NULL`.
     IsNull {
         /// The column.
@@ -102,6 +111,38 @@ pub enum Expr {
     Or(Box<Expr>, Box<Expr>),
     /// `NOT expr`.
     Not(Box<Expr>),
+    /// `EXISTS (SELECT ...)`. `NOT EXISTS` is `Expr::Not` wrapping this.
+    Exists {
+        /// The subquery whose row count is tested.
+        query: Box<SelectStatement>,
+    },
+    /// `column IN (SELECT ...)`. `NOT IN (SELECT ...)` is `Expr::Not` wrapping this.
+    InSubquery {
+        /// The column being tested for membership.
+        column: String,
+        /// The subquery producing the candidate set; must yield exactly one column.
+        query: Box<SelectStatement>,
+    },
+    /// `column <op> (SELECT ...)` — a scalar subquery comparison. The subquery
+    /// must yield exactly one row and one column at evaluation time, or
+    /// evaluation fails (mirrors PostgreSQL's "more than one row returned by
+    /// a subquery used as an expression").
+    ScalarCmp {
+        /// The column being compared.
+        column: String,
+        /// The comparison operator.
+        op: CmpOp,
+        /// The subquery producing the right-hand scalar value.
+        query: Box<SelectStatement>,
+    },
+    /// An aggregate function used in `HAVING` or `SELECT` expressions:
+    /// `COUNT(*)`, `SUM(col)`, `AVG(col)`, `MIN(col)`, `MAX(col)`.
+    Agg {
+        /// The aggregate function.
+        func: AggregateFunc,
+        /// The column argument (`*` for `COUNT(*)`).
+        column: String,
+    },
 }
 
 /// A column reference with optional sort direction.
@@ -159,8 +200,14 @@ pub enum JoinType {
 /// `FROM`/`JOIN` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableRef {
-    /// A plain table/view/CTE name.
-    Named(String),
+    /// A plain table/view/CTE name, optionally with an `AS alias`.
+    Named {
+        /// The underlying table name.
+        name: String,
+        /// Optional `AS alias` (used for table-qualified column resolution in
+        /// correlated subqueries).
+        alias: Option<String>,
+    },
     /// A derived table: `(SELECT ...) AS alias`.
     Subquery {
         /// The subquery producing the derived table's rows.
@@ -171,11 +218,20 @@ pub enum TableRef {
 }
 
 impl TableRef {
-    /// The name this reference is known by (the table name, or the subquery's
-    /// alias) — used for display/estimation purposes.
+    /// The effective name this reference is known by: the alias if present,
+    /// otherwise the underlying table name.  Used for display/estimation and
+    /// for qualifying column names in correlated-subquery scope resolution.
     pub fn name(&self) -> &str {
         match self {
-            TableRef::Named(n) => n,
+            TableRef::Named { alias, name, .. } => alias.as_deref().unwrap_or(name),
+            TableRef::Subquery { alias, .. } => alias,
+        }
+    }
+
+    /// The underlying table name (without any alias).
+    pub fn table_name(&self) -> &str {
+        match self {
+            TableRef::Named { name, .. } => name,
             TableRef::Subquery { alias, .. } => alias,
         }
     }
@@ -217,6 +273,19 @@ pub struct SelectStatement {
     pub order_by_cosine: Option<OrderByCosine>,
     /// Optional `LIMIT`.
     pub limit: Option<u64>,
+    /// Optional `HAVING` expression (applied after GROUP BY + aggregates).
+    pub having: Option<Expr>,
+    /// Common Table Expressions defined before this SELECT.
+    pub with_ctes: Vec<CTE>,
+}
+
+/// A Common Table Expression: `name AS (SELECT ...)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CTE {
+    /// The CTE name, usable as a table reference in the main query.
+    pub name: String,
+    /// The CTE's defining query.
+    pub query: SelectStatement,
 }
 
 /// An `ORDER BY cosine(<col>, <param>) LIMIT k` clause (RAG/embedding top-k).
@@ -288,6 +357,26 @@ pub struct CreateViewStatement {
     pub query: SelectStatement,
 }
 
+/// A parsed `ALTER TABLE` operation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlterTableOp {
+    /// `ALTER TABLE t ADD COLUMN name type`
+    AddColumn(ColumnDef),
+    /// `ALTER TABLE t DROP COLUMN name`
+    DropColumn(String),
+    /// `ALTER TABLE t RENAME COLUMN old TO new`
+    RenameColumn { old_name: String, new_name: String },
+}
+
+/// A parsed `ALTER TABLE t <op>` statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterTableStatement {
+    /// The table to alter.
+    pub table: String,
+    /// The operation to perform.
+    pub op: AlterTableOp,
+}
+
 /// A fully parsed statement: any of the supported DML/DQL/DDL forms.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -305,6 +394,8 @@ pub enum Statement {
     CreateView(CreateViewStatement),
     /// A `DROP VIEW name` statement.
     DropView(String),
+    /// An `ALTER TABLE` statement.
+    AlterTable(AlterTableStatement),
     /// A `BEGIN` transaction statement.
     Begin,
     /// A `COMMIT` transaction statement.
@@ -547,6 +638,7 @@ fn is_kw(s: &str) -> bool {
             | "commit"
             | "rollback"
             | "not"
+            | "exists"
     )
 }
 
@@ -636,6 +728,59 @@ fn parse_not(lx: &mut Lexer) -> Result<Expr, ParseError> {
 fn parse_primary_expr(lx: &mut Lexer) -> Result<Expr, ParseError> {
     let tok = lx.next_tok()?;
     match tok {
+        Tok::Ident(kw) if eq_ignore_case(kw, "exists") => {
+            expect_tok(lx, Tok::LParen, "'(' after EXISTS")?;
+            expect_kw(lx, "select")?;
+            let query = parse_select_inner(lx)?;
+            expect_tok(lx, Tok::RParen, "')' after EXISTS subquery")?;
+            Ok(Expr::Exists {
+                query: Box::new(query),
+            })
+        }
+        Tok::Ident(kw)
+            if matches!(
+                kw.to_ascii_lowercase().as_str(),
+                "count" | "sum" | "avg" | "min" | "max"
+            ) =>
+        {
+            let func = match kw.to_ascii_lowercase().as_str() {
+                "count" => AggregateFunc::Count,
+                "sum" => AggregateFunc::Sum,
+                "avg" => AggregateFunc::Avg,
+                "min" => AggregateFunc::Min,
+                "max" => AggregateFunc::Max,
+                _ => unreachable!(),
+            };
+            expect_tok(lx, Tok::LParen, "'(' after aggregate function")?;
+            let peek = lx.next_tok()?;
+            let col = if peek == Tok::Star {
+                expect_tok(lx, Tok::RParen, "')'")?;
+                "*".to_string()
+            } else {
+                push_back(lx, peek);
+                let c = expect_ident(lx, "column in aggregate")?;
+                expect_tok(lx, Tok::RParen, "')'")?;
+                c
+            };
+            // Check for optional comparison operator after aggregate, e.g.
+            // `COUNT(*) > 1`. Uses the aggregate's default alias as the
+            // column name so the executor can look it up in the result set.
+            let alias = crate::executor::agg_default_alias(func, &col);
+            match lx.next_tok()? {
+                Tok::Op(op) => {
+                    let value = parse_literal(lx)?;
+                    Ok(Expr::Cmp {
+                        column: alias,
+                        op,
+                        value,
+                    })
+                }
+                tok => {
+                    push_back(lx, tok);
+                    Ok(Expr::Agg { func, column: col })
+                }
+            }
+        }
         Tok::Ident(col) => {
             // Could be: col op val, col IS NULL, col LIKE ..., col IN (...),
             // col BETWEEN ... AND ..., or a keyword (shouldn't happen here).
@@ -698,6 +843,18 @@ fn parse_primary_expr(lx: &mut Lexer) -> Result<Expr, ParseError> {
                 }
                 Tok::Ident(kw) if eq_ignore_case(kw, "in") => {
                     expect_tok(lx, Tok::LParen, "'(' after IN")?;
+                    let peek = lx.next_tok()?;
+                    if let Tok::Ident(k2) = &peek {
+                        if eq_ignore_case(k2, "select") {
+                            let query = parse_select_inner(lx)?;
+                            expect_tok(lx, Tok::RParen, "')' after IN subquery")?;
+                            return Ok(Expr::InSubquery {
+                                column: col.to_string(),
+                                query: Box::new(query),
+                            });
+                        }
+                    }
+                    push_back(lx, peek);
                     let mut values = Vec::new();
                     loop {
                         values.push(expect_int(lx, "value in IN list")?);
@@ -746,6 +903,31 @@ fn parse_primary_expr(lx: &mut Lexer) -> Result<Expr, ParseError> {
                             op,
                             value: Literal::Text(s.to_string()),
                         }),
+                        Tok::Ident(right) => {
+                            let mut right = right.to_string();
+                            let peek = lx.next_tok()?;
+                            if let Tok::Dot = peek {
+                                let field = expect_ident(lx, "field name after '.'")?;
+                                right = alloc::format!("{right}.{field}");
+                            } else {
+                                push_back(lx, peek);
+                            }
+                            Ok(Expr::CmpColumn {
+                                left: col.to_string(),
+                                op,
+                                right,
+                            })
+                        }
+                        Tok::LParen => {
+                            expect_kw(lx, "select")?;
+                            let query = parse_select_inner(lx)?;
+                            expect_tok(lx, Tok::RParen, "')' after scalar subquery")?;
+                            Ok(Expr::ScalarCmp {
+                                column: col.to_string(),
+                                op,
+                                query: Box::new(query),
+                            })
+                        }
                         _ => Err(ParseError("expected value after operator".to_string())),
                     }
                 }
@@ -796,14 +978,10 @@ fn parse_table_ref(lx: &mut Lexer) -> Result<TableRef, ParseError> {
             let query = parse_select_inner(lx)?;
             expect_tok(lx, Tok::RParen, "')' after subquery")?;
             let alias = match lx.next_tok()? {
-                Tok::Ident(kw) if eq_ignore_case(kw, "as") => {
-                    expect_ident(lx, "subquery alias")?
-                }
+                Tok::Ident(kw) if eq_ignore_case(kw, "as") => expect_ident(lx, "subquery alias")?,
                 t => {
                     push_back(lx, t);
-                    return Err(ParseError(
-                        "subquery must have an AS alias".to_string(),
-                    ));
+                    return Err(ParseError("subquery must have an AS alias".to_string()));
                 }
             };
             Ok(TableRef::Subquery {
@@ -811,7 +989,21 @@ fn parse_table_ref(lx: &mut Lexer) -> Result<TableRef, ParseError> {
                 alias,
             })
         }
-        Tok::Ident(name) => Ok(TableRef::Named(name.to_string())),
+        Tok::Ident(name) => {
+            let alias = match lx.next_tok()? {
+                Tok::Ident(kw) if eq_ignore_case(kw, "as") => {
+                    Some(expect_ident(lx, "table alias")?)
+                }
+                other => {
+                    push_back(lx, other);
+                    None
+                }
+            };
+            Ok(TableRef::Named {
+                name: name.to_string(),
+                alias,
+            })
+        }
         _ => Err(ParseError("expected table name or '('".to_string())),
     }
 }
@@ -1181,6 +1373,7 @@ fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
     let mut limit = None;
     let mut order_by_cosine = None;
     let mut group_by = Vec::new();
+    let mut having = None;
     let mut order_by = Vec::new();
 
     // Optional WHERE / GROUP BY / ORDER BY / LIMIT.
@@ -1207,6 +1400,13 @@ fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
                         }
                     }
                 }
+                t = lx.next_tok()?;
+            }
+            Tok::Ident(kw) if eq_ignore_case(kw, "having") => {
+                if having.is_some() {
+                    return Err(ParseError("duplicate HAVING".to_string()));
+                }
+                having = Some(parse_expr(lx)?);
                 t = lx.next_tok()?;
             }
             Tok::Ident(kw) if eq_ignore_case(kw, "order") => {
@@ -1319,7 +1519,93 @@ fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
         order_by,
         order_by_cosine,
         limit,
+        having,
+        with_ctes: Vec::new(),
     })
+}
+
+/// Parse a `WITH` clause: `name AS (SELECT ...) [, name2 AS (SELECT ...)]`.
+/// Returns the list of CTEs. Called when the top-level token is `WITH`.
+fn parse_with_clause(lx: &mut Lexer) -> Result<Vec<CTE>, ParseError> {
+    let mut ctes = Vec::new();
+    loop {
+        let name = expect_ident(lx, "CTE name")?;
+        expect_kw(lx, "as")?;
+        expect_tok(lx, Tok::LParen, "'(' after AS in CTE")?;
+        match lx.next_tok()? {
+            Tok::Ident(kw) if eq_ignore_case(kw, "select") => {}
+            _ => return Err(ParseError("expected SELECT in CTE".to_string())),
+        }
+        let query = parse_select_inner(lx)?;
+        expect_tok(lx, Tok::RParen, "')' after CTE subquery")?;
+        ctes.push(CTE { name, query });
+        // Check for comma (more CTEs) or end of WITH clause.
+        match lx.next_tok()? {
+            Tok::Comma => continue,
+            tok => {
+                push_back(lx, tok);
+                break;
+            }
+        }
+    }
+    Ok(ctes)
+}
+
+// ---------------------------------------------------------------------------
+// ALTER TABLE
+// ---------------------------------------------------------------------------
+
+fn parse_alter_table(lx: &mut Lexer) -> Result<AlterTableStatement, ParseError> {
+    let table = expect_ident(lx, "table name")?;
+    let op = match lx.next_tok()? {
+        Tok::Ident(kw) if eq_ignore_case(kw, "add") => {
+            expect_kw(lx, "column")?;
+            let name = expect_ident(lx, "column name")?;
+            let ctype = match lx.next_tok()? {
+                Tok::Ident(kw) if eq_ignore_case(kw, "int") => ColumnType::Int,
+                Tok::Ident(kw) if eq_ignore_case(kw, "text") => ColumnType::Text,
+                Tok::Ident(kw) if eq_ignore_case(kw, "vector") => {
+                    // Optional [N] dimension hint, ignored.
+                    if let Tok::LBracket = lx.next_tok()? {
+                        // Skip digits and consume ']'.
+                        while lx.pos < lx.bytes().len() && lx.bytes()[lx.pos].is_ascii_digit() {
+                            lx.pos += 1;
+                        }
+                        if lx.pos < lx.bytes().len() && lx.bytes()[lx.pos] == b']' {
+                            lx.pos += 1;
+                        }
+                    } else {
+                        push_back(lx, Tok::Ident("vector"));
+                    }
+                    ColumnType::Vector
+                }
+                _ => {
+                    return Err(ParseError(
+                        "expected column type (INT, TEXT, VECTOR)".to_string(),
+                    ))
+                }
+            };
+            AlterTableOp::AddColumn(ColumnDef { name, ctype })
+        }
+        Tok::Ident(kw) if eq_ignore_case(kw, "drop") => {
+            expect_kw(lx, "column")?;
+            let name = expect_ident(lx, "column name")?;
+            AlterTableOp::DropColumn(name)
+        }
+        Tok::Ident(kw) if eq_ignore_case(kw, "rename") => {
+            expect_kw(lx, "column")?;
+            let old_name = expect_ident(lx, "old column name")?;
+            expect_kw(lx, "to")?;
+            let new_name = expect_ident(lx, "new column name")?;
+            AlterTableOp::RenameColumn { old_name, new_name }
+        }
+        _ => {
+            return Err(ParseError(
+                "expected ADD, DROP, or RENAME after ALTER TABLE".to_string(),
+            ))
+        }
+    };
+    Ok(AlterTableStatement { table, op })
 }
 
 // ---------------------------------------------------------------------------
@@ -1329,6 +1615,20 @@ fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
 pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
     let mut lx = Lexer::new(input);
     match lx.next_tok()? {
+        Tok::Ident(kw) if eq_ignore_case(kw, "with") => {
+            let ctes = parse_with_clause(&mut lx)?;
+            // After WITH, expect SELECT.
+            match lx.next_tok()? {
+                Tok::Ident(kw) if eq_ignore_case(kw, "select") => {}
+                _ => return Err(ParseError("expected SELECT after WITH".to_string())),
+            }
+            let mut stmt = parse_select_inner(&mut lx)?;
+            stmt.with_ctes = ctes;
+            if lx.next_tok()? != Tok::Eof {
+                return Err(ParseError("trailing tokens after statement".to_string()));
+            }
+            Ok(Statement::Select(stmt))
+        }
         Tok::Ident(kw) if eq_ignore_case(kw, "select") => {
             let stmt = parse_select_inner(&mut lx)?;
             if lx.next_tok()? != Tok::Eof {
@@ -1349,7 +1649,9 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
                 Tok::Ident(s) if eq_ignore_case(s, "view") => {
                     parse_create_view(&mut lx).map(Statement::CreateView)
                 }
-                _ => Err(ParseError("expected TABLE or VIEW after CREATE".to_string())),
+                _ => Err(ParseError(
+                    "expected TABLE or VIEW after CREATE".to_string(),
+                )),
             }
         }
         Tok::Ident(kw) if eq_ignore_case(kw, "drop") => match lx.next_tok()? {
@@ -1362,30 +1664,45 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
             }
             _ => Err(ParseError("expected VIEW after DROP".to_string())),
         },
+        Tok::Ident(kw) if eq_ignore_case(kw, "alter") => {
+            expect_kw(&mut lx, "table")?;
+            let stmt = parse_alter_table(&mut lx)?;
+            if lx.next_tok()? != Tok::Eof {
+                return Err(ParseError("trailing tokens after statement".to_string()));
+            }
+            Ok(Statement::AlterTable(stmt))
+        }
         Tok::Ident(kw) if eq_ignore_case(kw, "begin") => Ok(Statement::Begin),
         Tok::Ident(kw) if eq_ignore_case(kw, "commit") => Ok(Statement::Commit),
         Tok::Ident(kw) if eq_ignore_case(kw, "rollback") => Ok(Statement::Rollback),
         _ => Err(ParseError(
             "expected SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, CREATE VIEW, DROP VIEW, \
-             BEGIN, COMMIT, or ROLLBACK"
+             ALTER TABLE, BEGIN, COMMIT, or ROLLBACK"
                 .to_string(),
         )),
     }
 }
 
-/// Convenience: parse a standalone SELECT.
+/// Convenience: parse a standalone SELECT (with optional WITH clause).
 pub fn parse_select(input: &str) -> Result<SelectStatement, ParseError> {
     let mut lx = Lexer::new(input);
-    match lx.next_tok()? {
-        Tok::Ident(kw) if eq_ignore_case(kw, "select") => {
-            let stmt = parse_select_inner(&mut lx)?;
-            if lx.next_tok()? != Tok::Eof {
-                return Err(ParseError("trailing tokens after statement".to_string()));
-            }
-            Ok(stmt)
+    let ctes = match lx.next_tok()? {
+        Tok::Ident(kw) if eq_ignore_case(kw, "with") => parse_with_clause(&mut lx)?,
+        tok => {
+            push_back(&mut lx, tok);
+            Vec::new()
         }
-        _ => Err(ParseError("expected SELECT".to_string())),
+    };
+    match lx.next_tok()? {
+        Tok::Ident(kw) if eq_ignore_case(kw, "select") => {}
+        _ => return Err(ParseError("expected SELECT".to_string())),
     }
+    let mut stmt = parse_select_inner(&mut lx)?;
+    stmt.with_ctes = ctes;
+    if lx.next_tok()? != Tok::Eof {
+        return Err(ParseError("trailing tokens after statement".to_string()));
+    }
+    Ok(stmt)
 }
 
 // ---------------------------------------------------------------------------
@@ -1400,7 +1717,13 @@ mod tests {
     fn parses_star_select() {
         let s = parse_select("SELECT * FROM users").unwrap();
         assert!(s.star);
-        assert_eq!(s.table, TableRef::Named("users".to_string()));
+        assert_eq!(
+            s.table,
+            TableRef::Named {
+                name: "users".into(),
+                alias: None
+            }
+        );
         assert!(s.filter.is_none());
         assert!(s.limit.is_none());
     }
@@ -1410,7 +1733,13 @@ mod tests {
         let s = parse_select("SELECT id, name FROM t WHERE age >= 18 LIMIT 5").unwrap();
         assert!(!s.star);
         assert_eq!(s.columns, alloc::vec!["id".to_string(), "name".to_string()]);
-        assert_eq!(s.table, TableRef::Named("t".to_string()));
+        assert_eq!(
+            s.table,
+            TableRef::Named {
+                name: "t".into(),
+                alias: None
+            }
+        );
         assert!(s.filter.is_some());
         assert_eq!(s.limit, Some(5));
     }
@@ -1481,7 +1810,13 @@ mod tests {
         match s {
             Statement::CreateView(cv) => {
                 assert_eq!(cv.name, "adults");
-                assert_eq!(cv.query.table, TableRef::Named("t".to_string()));
+                assert_eq!(
+                    cv.query.table,
+                    TableRef::Named {
+                        name: "t".into(),
+                        alias: None
+                    }
+                );
                 assert!(cv.query.filter.is_some());
             }
             _ => panic!("expected CreateView"),
@@ -1549,7 +1884,13 @@ mod tests {
     fn parses_join() {
         let s = parse_select("SELECT * FROM t1 JOIN t2 ON t1.id = t2.t1_id").unwrap();
         assert_eq!(s.joins.len(), 1);
-        assert_eq!(s.joins[0].table, TableRef::Named("t2".to_string()));
+        assert_eq!(
+            s.joins[0].table,
+            TableRef::Named {
+                name: "t2".into(),
+                alias: None
+            }
+        );
         assert_eq!(s.joins[0].left_col, "t1.id");
         assert_eq!(s.joins[0].right_col, "t2.t1_id");
     }
@@ -1635,7 +1976,13 @@ mod tests {
             match &sel.table {
                 TableRef::Subquery { query, alias } => {
                     assert_eq!(alias, "sub");
-                    assert_eq!(query.table, TableRef::Named("t".to_string()));
+                    assert_eq!(
+                        query.table,
+                        TableRef::Named {
+                            name: "t".into(),
+                            alias: None
+                        }
+                    );
                     assert!(query.filter.is_some());
                 }
                 _ => panic!("expected Subquery"),
@@ -1649,5 +1996,71 @@ mod tests {
     fn parses_subquery_without_alias_errors() {
         let r = parse_statement("SELECT * FROM (SELECT id FROM t)");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn parses_with_cte() {
+        let s = parse_statement("WITH cte AS (SELECT id FROM t WHERE age > 18) SELECT * FROM cte")
+            .unwrap();
+        if let Statement::Select(sel) = s {
+            assert_eq!(sel.with_ctes.len(), 1);
+            assert_eq!(sel.with_ctes[0].name, "cte");
+            assert!(sel.with_ctes[0].query.filter.is_some());
+        } else {
+            panic!("expected Select");
+        }
+    }
+
+    #[test]
+    fn parses_multiple_ctes() {
+        let s = parse_statement(
+            "WITH a AS (SELECT id FROM t), b AS (SELECT id FROM t) SELECT * FROM a",
+        )
+        .unwrap();
+        if let Statement::Select(sel) = s {
+            assert_eq!(sel.with_ctes.len(), 2);
+            assert_eq!(sel.with_ctes[0].name, "a");
+            assert_eq!(sel.with_ctes[1].name, "b");
+        } else {
+            panic!("expected Select");
+        }
+    }
+
+    #[test]
+    fn parses_exists_with_column_comparison() {
+        let s = parse_statement(
+            "SELECT id FROM t WHERE EXISTS (SELECT id FROM t AS inner_t WHERE inner_t.id < t.id)",
+        )
+        .unwrap();
+        if let Statement::Select(sel) = s {
+            assert!(sel.filter.is_some());
+        } else {
+            panic!("expected Select");
+        }
+    }
+
+    #[test]
+    fn parses_column_to_column() {
+        let s = parse_statement("SELECT id FROM t WHERE id < age").unwrap();
+        if let Statement::Select(sel) = s {
+            assert!(sel.filter.is_some());
+        } else {
+            panic!("expected Select");
+        }
+    }
+
+    #[test]
+    fn parses_recursive_cte_errors() {
+        // WITH RECURSIVE is not supported yet.
+        let r = parse_statement("WITH RECURSIVE cte AS (SELECT 1) SELECT * FROM cte");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parses_having() {
+        let s =
+            parse_select("SELECT dept, COUNT(*) FROM t GROUP BY dept HAVING COUNT(*) > 1").unwrap();
+        assert!(s.having.is_some());
+        assert_eq!(s.group_by, alloc::vec!["dept".to_string()]);
     }
 }

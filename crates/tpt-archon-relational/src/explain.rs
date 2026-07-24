@@ -79,6 +79,7 @@ fn render_node(node: &PlanNode, depth: usize, out: &mut String) {
         PlanNode::Aggregate {
             group_by,
             aggregates,
+            having,
             input,
         } => {
             let gb = if group_by.is_empty() {
@@ -90,8 +91,12 @@ fn render_node(node: &PlanNode, depth: usize, out: &mut String) {
                 .iter()
                 .map(|(alias, func, col)| alloc::format!("{func:?}({col}) AS {alias}"))
                 .collect();
+            let hv = having
+                .as_ref()
+                .map(|e| alloc::format!(", having: {e:?}"))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "{indent}Aggregate {{ group_by: [{gb}], aggs: [{}] }}\n",
+                "{indent}Aggregate {{ group_by: [{gb}], aggs: [{}]{hv} }}\n",
                 aggs.join(", ")
             ));
             render_node(input, depth + 1, out);

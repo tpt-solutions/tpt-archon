@@ -55,14 +55,14 @@ path-dependencies — this is the crate that can be `cargo publish`'d first.
 - [x] Append-only log format with Log Sequence Numbers (LSN)
 - [x] Write page modification to WAL before main storage (write-ahead invariant)
 - [x] Crash recovery: WAL replay
-- [x] `tpt-telos` formal verification: replaying the WAL after any crash results in a consistent state (proven in `crates/tpt-archon-verify` via `tpt-telos-verifier`; runtime still also tested via torn-tail truncation, see ADR 0003)
+- [x] `tpt-telos` formal verification: replaying the WAL after any crash results in a consistent state (proven in `crates/out-archon-verify` via `tpt-telos-verifier`; runtime still also tested via torn-tail truncation, see ADR 0003)
 
 ### B-Link tree
 - [x] Concurrent B-Link tree structure, latch-free reads (right-link + high-key structure; single-threaded arena today, concurrency-ready layout)
 - [x] Range scans, point lookups, concurrent inserts
-- [x] `tpt-eidos` compile-time invariant: node capacity cannot overflow page size (proven in `crates/tpt-archon-verify` via `tpt-eidos-verifier`; also a `const` assertion `btree::assert_node_fits_page`, see ADR 0003)
-- [x] `tpt-eidos` node-capacity invariant proven end-to-end (B-Link node max size <= `PAGE_SIZE`, and an over-capacity node cannot fit) in `crates/tpt-archon-verify`
-- [x] `tpt-telos` formal verification: B-Tree structural invariants hold across all operations (`formal-proofs/btree.telos` + `tpt-archon-verify` — leaf key count stays `1 <= keys <= NODE_CAPACITY` across insert/replace/split; capacity page-fit proven via eidos)
+- [x] `tpt-eidos` compile-time invariant: node capacity cannot overflow page size (proven in `crates/out-archon-verify` via `tpt-eidos-verifier`; also a `const` assertion `btree::assert_node_fits_page`, see ADR 0003)
+- [x] `tpt-eidos` node-capacity invariant proven end-to-end (B-Link node max size <= `PAGE_SIZE`, and an over-capacity node cannot fit) in `crates/out-archon-verify`
+- [x] `tpt-telos` formal verification: B-Tree structural invariants hold across all operations (`formal-proofs/btree.telos` + `out-archon-verify` — leaf key count stays `1 <= keys <= NODE_CAPACITY` across insert/replace/split; capacity page-fit proven via eidos)
 
 ### crates.io readiness — `tpt-archon-core`
 - [x] `Cargo.toml`: `description`, `readme = "README.md"`, `documentation = "https://docs.rs/tpt-archon-core"`, `keywords`/`categories` (inherit from `[workspace.package]` where possible)
@@ -102,7 +102,7 @@ Capability-based microkernel with unified page cache. Depends on
 
 - [x] Async task scheduler: one `Task` per DB connection (not an OS process)
 - [ ] `io_uring` backend for async I/O on Linux (user-space mode) (cooperative user-space scheduler implemented first per Risk 1; `io_uring` backend is a later milestone)
-- [x] `tpt-telos` formal verification: scheduler cannot deadlock (`formal-proofs/scheduler.telos` + `tpt-archon-verify` — round-robin poll keeps runnable count monotone on `Pending` and drains on `Ready`, so with one eventually-`Ready` task progress is forced and no held-resource cycle exists)
+- [x] `tpt-telos` formal verification: scheduler cannot deadlock (`formal-proofs/scheduler.telos` + `out-archon-verify` — round-robin poll keeps runnable count monotone on `Pending` and drains on `Ready`, so with one eventually-`Ready` task progress is forced and no held-resource cycle exists)
 - [x] Memory management: kernel page cache == DB buffer pool (literally the same allocation, via the bridge's unified page cache trait)
 - [ ] Memory-mapped file backing with zero-copy access (user-space model validated first; real `mmap` is a later milestone)
 - [x] Capability-based access control enforced at the memory-mapping layer
@@ -145,7 +145,7 @@ service on the Archon microkernel. Depends on all three crates above.
 ### MVCC
 - [x] Serializable isolation level (snapshot isolation + optimistic read/write-set validation)
 - [x] Built on the unified page cache from `tpt-archon-bridge` (no separate buffer pool) (versioned store keyed by page/key; no second buffer pool)
-- [x] `tpt-telos` formal verification: MVCC cannot violate serializability (conflict-abort proven in `crates/tpt-archon-verify` via `tpt-telos-verifier`; runtime also tested for conflict detection, see ADR 0003)
+- [x] `tpt-telos` formal verification: MVCC cannot violate serializability (conflict-abort proven in `crates/out-archon-verify` via `tpt-telos-verifier`; runtime also tested for conflict detection, see ADR 0003)
 
 ### Storage integration
 - [x] All persistence via `tpt-archon-core`; zero-copy access to storage pages, no separate buffer pool
@@ -161,9 +161,9 @@ service on the Archon microkernel. Depends on all three crates above.
 
 ## Cross-cutting
 
-- [x] `crates/tpt-archon-verify` — non-published verification harness exercising the live ecosystem verifiers: `tpt-eidos-verifier` (B-Link node-capacity invariant), `tpt-telos-verifier` (WAL replay + MVCC serializability), and `tpt-gpu-ir-spec` (top-k scan TPTIR emission). Kept out of the shippable crates so `cargo publish -p tpt-archon-core --dry-run` stays clean (crates.io rejects git deps even in dev-deps).
+- [x] `crates/out-archon-verify` — non-published verification harness exercising the live ecosystem verifiers: `tpt-eidos-verifier` (B-Link node-capacity invariant), `tpt-telos-verifier` (WAL replay + MVCC serializability), and `tpt-gpu-ir-spec` (top-k scan TPTIR emission). Kept out of the shippable crates so `cargo publish -p tpt-archon-core --dry-run` stays clean (crates.io rejects git deps even in dev-deps).
 - [x] Criterion benchmarks in `benches/` validating the specific numbers in `spec.txt`'s "Success Metrics": 30% faster than PostgreSQL (I/O-bound), 2x SQLite (embedded), 10x pgvector (vector search) — track actual measured numbers, don't assume the spec's targets are met (bench harness scaffolded in `benches/` for storage + query hot paths and vector search; external DB comparison harnesses still to be added, and no target is assumed met until measured)
-- [x] `formal-proofs/` — QF_LRA **assertion-harness** `.telos` artifacts for each verified invariant (WAL, B-Tree, MVCC, scheduler), checked into the repo and discharged by `cargo test -p tpt-archon-verify` via `tpt-telos-verifier` (see `formal-proofs/README.md`). These are **solver-checked regression tests, not machine-checked Coq/Lean proofs**; QF_LRA cannot express multi-interleaving serializability or capability unforgeability, so the docs say so plainly. `tpt-telos` has no Coq/Lean backend — its codegen targets Rust/Go; the `.telos` sources + passing harness tests are the authoritative artifacts. The node-capacity page-fit bound is proven separately with `tpt-eidos-verifier`.
+- [x] `formal-proofs/` — QF_LRA **assertion-harness** `.telos` artifacts for each verified invariant (WAL, B-Tree, MVCC, scheduler), checked into the repo and discharged by `cargo test -p out-archon-verify` via `tpt-telos-verifier` (see `formal-proofs/README.md`). These are **solver-checked regression tests, not machine-checked Coq/Lean proofs**; QF_LRA cannot express multi-interleaving serializability or capability unforgeability, so the docs say so plainly. `tpt-telos` has no Coq/Lean backend — its codegen targets Rust/Go; the `.telos` sources + passing harness tests are the authoritative artifacts. The node-capacity page-fit bound is proven separately with `tpt-eidos-verifier`.
 - [x] ADRs in `docs/` for major architectural decisions as they're made (not just ADR 0001) (added ADR 0002 zero-alloc primitives, ADR 0003 verification tested-now-proven-later)
 - [x] Zero-CVE / zero-silent-corruption / zero-race-condition claims in `spec.txt` are marketing language until backed by the formal verification work above — don't repeat them in crate descriptions until proofs exist (no such claims appear in any crate `description`/docs; enforced by ADR 0003)
 
@@ -175,9 +175,9 @@ Handover work from the platform review (`platform-review-bugs-adoption` plan).
 Ordered de-risk-first; trust fixes are done, correctness/adoption tasks remain.
 
 ### 4.1 Trust & supply-chain fixes (DONE)
-- [x] Exclude `crates/tpt-archon-verify` from the default workspace (`exclude = ["benches", "crates/tpt-archon-verify"]` in root `Cargo.toml`) so `cargo test --workspace` is offline-clean and the 4 shippable crates gate the run.
-- [x] Add opt-in `verify` CI job (network access) running `cargo test -p tpt-archon-verify`; keep the `test` job offline for the shippable crates.
-- [x] Fix `README.md` §"TPT ecosystem dependencies" to match AGENTS.md: drop the nonexistent `tpt-gpu-primitives`/`tpt-gpu-runtime`; document `tpt-gpu-ir-spec` as an IR **emitter** (no runtime), and that the verifier git deps live only in the non-published `tpt-archon-verify` harness.
+- [x] Exclude `crates/out-archon-verify` from the default workspace (`exclude = ["benches", "crates/out-archon-verify"]` in root `Cargo.toml`) so `cargo test --workspace` is offline-clean and the 4 shippable crates gate the run.
+- [x] Add opt-in `verify` CI job (network access) running `cargo test -p out-archon-verify`; keep the `test` job offline for the shippable crates.
+- [x] Fix `README.md` §"TPT ecosystem dependencies" to match AGENTS.md: drop the nonexistent `tpt-gpu-primitives`/`tpt-gpu-runtime`; document `tpt-gpu-ir-spec` as an IR **emitter** (no runtime), and that the verifier git deps live only in the non-published `out-archon-verify` harness.
 - [x] Clarify `formal-proofs/README.md`: the `.telos` sources are QF_LRA **solver-checked assertion harnesses**, not machine-checked Coq/Lean proofs; state QF_LRA's limits plainly.
 - [x] Reconciled TODO files: `TODO.md` is the single source of truth; the drifted `TODO 1260719.md` is retained for history but no longer authoritative.
 
@@ -210,7 +210,7 @@ CI automation, differentiation ideas). Ordered de-risk-first.
 ### 5.1 Bugs / correctness
 - [x] Replace the non-test `.unwrap()` in `run_update` (`crates/tpt-archon-relational/src/database.rs:253`, `self.tree.get(id).unwrap()`) with proper error handling — safe only under the current single-writer assumption; becomes a real panic risk the moment concurrent UPDATE/DELETE or async execution is introduced.
 - [x] Add a checksum/validation layer before `decode_row` (`crates/tpt-archon-relational/src/database.rs:192-242`) so corrupted bytes surfaced from the B-Link tree fail gracefully instead of panicking on raw unchecked slice indexing.
-- [ ] Revisit `BufferPool::flush_all` (`crates/tpt-archon-core/src/page.rs:280-308`) flushing `Pinned` frames with `dirty_intent` set — currently documented as intentional (ADR-style), but consider whether callers need a commit-scoped flush variant now that `StorageEngine` is the recommended write path.
+- [x] Revisit `BufferPool::flush_all` (`crates/tpt-archon-core/src/page.rs:280-308`) flushing `Pinned` frames with `dirty_intent` set — currently documented as intentional (ADR-style), but consider whether callers need a commit-scoped flush variant now that `StorageEngine` is the recommended write path. (Intentional behavior confirmed: `StorageEngine` uses WAL for commit-scoped durability; `flush_all` with pinned frames is only relevant for direct `BufferPool` users bypassing `StorageEngine`. Documented in ADR-style doc comment at `page.rs:282-289`.)
 
 ### 5.2 SQL surface gap (vs. "PostgreSQL-compatible" claim in spec.txt)
 - [x] Multi-predicate `WHERE` support (`AND`/`OR`) — smallest-effort, highest-impact grammar change; turn `Predicate` (`crates/tpt-archon-relational/src/parser.rs:36-43`) into a boolean expression tree.
@@ -223,17 +223,24 @@ CI automation, differentiation ideas). Ordered de-risk-first.
 - [ ] Reconcile `spec.txt`'s "PostgreSQL-compatible SQL dialect" / "drop-in replacement" language with actual grammar coverage, or scope the claim down until the above land — avoid repeating the marketing-ahead-of-reality pattern already flagged for zero-CVE claims in ADR 0003.
 
 ### Phase 6 — Full SQL compatibility (subqueries, CTEs, views, ALTER TABLE)
-- [ ] Foundation: generalized `Expr` (`Literal`-based comparisons instead of hardcoded `i64`, real `IsNull`/`IsNotNull` semantics, `NOT` support), a `TableRef` enum replacing bare table-name strings, a DB-aware expression-evaluation calling convention, and a nested-scan `PlanNode` variant — the shared primitive views/subqueries/CTEs all build on.
-- [ ] Wire `BEGIN`/`COMMIT`/`ROLLBACK` to the existing `mvcc::MvccStore` instead of the current `in_transaction: bool` flag (today `ROLLBACK` is a no-op — writes are never undone).
-- [ ] `CREATE VIEW` / `DROP VIEW`.
-- [ ] Subqueries in `FROM` (derived tables) and scalar/`IN`/`EXISTS` subqueries in `WHERE`.
-- [ ] `WITH` (CTEs), non-recursive first; `WITH RECURSIVE` tracked separately as follow-up, not silently dropped.
-- [ ] `ALTER TABLE ADD COLUMN` / `DROP COLUMN` / `RENAME COLUMN` (parallel track — storage-format/row-codec migration work, no query-engine dependency).
+- [x] Foundation: generalized `Expr` (`Literal`-based comparisons instead of hardcoded `i64`, real `IsNull`/`IsNotNull` semantics, `NOT` support), a `TableRef` enum replacing bare table-name strings, a DB-aware expression-evaluation calling convention, and a nested-scan `PlanNode` variant — the shared primitive views/subqueries/CTEs all build on.
+- [x] Wire `BEGIN`/`COMMIT`/`ROLLBACK` to the existing `mvcc::MvccStore` instead of the current `in_transaction: bool` flag (today `ROLLBACK` is a no-op — writes are never undone).
+- [x] `CREATE VIEW` / `DROP VIEW`.
+- [x] Subqueries in `FROM` (derived tables) and scalar/`IN`/`EXISTS` subqueries in `WHERE`.
+- [x] `WITH` (CTEs), non-recursive first; `WITH RECURSIVE` tracked separately as follow-up, not silently dropped.
+- [x] `ALTER TABLE ADD COLUMN` / `DROP COLUMN` / `RENAME COLUMN` (parallel track — storage-format/row-codec migration work, no query-engine dependency).
 - [ ] Reconcile `spec.txt` wording once all boxes above are checked (this time for real, not by softening the claim).
+
+### Phase 6 follow-ups (known limitations from the `WHERE`-subquery work)
+- [x] Cache uncorrelated subquery results: `Database::eval_where` re-runs an `Exists`/`InSubquery`/`ScalarCmp` subquery once per outer row today, even when it never references the outer row at all — no correlation analysis exists yet to detect and cache that case.
+- [x] Extend correlation past one level: a subquery's `WHERE` can see its immediate outer row (via `executor::find_value`'s `outer` fallback), but a subquery nested two levels deep cannot see the outermost row — only its direct parent.
+- [x] `WHERE`-subquery inherits the outer query's `WITH` CTEs — outer CTEs thread through `run_select_scoped`, `eval_where`, `resolve_table_ref_with_ctes`, and all correlated-subquery callsites. Subquery CTEs shadow outer ones of the same name.
+- [x] `HAVING` for `GROUP BY` + aggregate filtering — full parser/planner/executor support; supports aggregate comparisons (`COUNT(*) > 1`, `SUM(age) >= 30`) and logic combinators (`AND`/`OR`).
+- [x] `ORDER BY cosine(...) LIMIT k` (`run_vector_topk`) now evaluates `WHERE` before embedding extraction in both subquery and named-table paths.
 
 ### 5.3 Adoption — interactive entry point
 - [x] `archon-sql` REPL binary (first `[[bin]]` target in the workspace — none exists today) wrapping `relational::database::Database` so newcomers can run SQL interactively instead of only via `cargo run --example` or writing Rust.
-- [ ] Single-binary/Docker demo image built on the REPL, for a zero-install "try it" path.
+- [x] Single-binary/Docker demo image built on the REPL, for a zero-install "try it" path. (`Dockerfile` + `docker-compose.yml`)
 - [x] Top-level "which crate do I start with" quick-start pointer in the root `README.md` (today a newcomer has to read all four crate READMEs/ADRs to learn `tpt-archon-relational` is the SQL entry point).
 
 ### 5.4 CI / supply-chain automation
@@ -245,6 +252,16 @@ CI automation, differentiation ideas). Ordered de-risk-first.
 
 ### 5.5 Differentiation / innovative additions
 - [x] Ship the `archon-sql` REPL (5.3) as the vehicle for demoing vector search live (`ORDER BY cosine(...) LIMIT k`).
-- [ ] Published pgvector benchmark comparison using the existing Criterion scaffold (`benches/benches/query.rs`, `benches/benches/storage.rs`) to back `spec.txt`'s performance claims with measured numbers.
+- [x] Published pgvector benchmark comparison using the existing Criterion scaffold (`benches/benches/vector_compare.rs`) to back `spec.txt`'s performance claims with measured numbers. Fixed a real bug in the harness along the way: binding the embedding as a `String` through `$2::vector` failed `ToSql` because Postgres infers the parameter's wire type from the cast target (`vector`), not `TEXT`; switched to `prepare_typed` pinning params to `TEXT`/`INT4` so the cast happens server-side. First pass (brute-force `vector_topk` only) measured Archon losing to pgvector at 100k rows (~2.5x slower) — see the IVFFlat index item directly below for the fix and corrected numbers.
+- [x] Added an actual ANN index (`crates/tpt-archon-relational/src/vector_index.rs`, `IvfFlatIndex`) to close the 100k-row gap the brute-force `vector_topk` benchmark above exposed, instead of just tuning the brute-force kernel further:
+  - IVFFlat (k-means over `nlist = clamp(sqrt(n), 1, 256)` clusters, `nprobe`-cluster probing at search time) — the same algorithm family and recall/speed trade pgvector's own IVFFlat index type makes; a true nearest neighbor in an unprobed cluster can be missed, same as pgvector's.
+  - Clustering runs on L2-normalized (unit) vectors — cosine direction, "spherical k-means" — even though the final re-rank of candidates still scores by the same raw inner product `vector_topk` uses. Raw (unnormalized) dot-product clustering was tried first and collapses: a centroid that ends up with larger norm keeps winning more points' nearest-cluster assignment every Lloyd iteration regardless of direction, so a couple of centroids absorb most of the dataset and `nprobe` clusters end up covering nearly all rows — no faster than brute force. This was caught by first testing against high-entropy pseudo-random embeddings; an earlier pass over the benchmark's low-cardinality period-7 synthetic embeddings (`(i+d) % 7`) masked it and produced misleadingly good (400-1000x) numbers, so `make_embeddings` in the bench harness was switched to a deterministic xorshift64* PRNG for realistic-looking data.
+  - Wired transparently into `Database`: built lazily the first time a vector column's live row count crosses `vector_index::MIN_ROWS_FOR_INDEX` (1,000), then maintained incrementally on every `INSERT`/`UPDATE`/`DELETE`/`COMMIT` after that — no new SQL syntax, `ORDER BY cosine(...) LIMIT k` just gets faster once a table is large enough. Below the threshold, or before the lazy build fires, queries still fall back to the exact brute-force scan.
+  - Fixed a latent bug in `run_vector_topk`'s brute-force path while touching this code: it scanned `while let Some(bytes) = ts.tree.get(id) { id += 1 }`, which stops at the *first* deleted row's hole instead of scanning the full `id` range — silently truncating results on any table with a mid-range delete. Changed to `for id in 0..ts.next_row_id` with a `continue` on missing ids, matching every other full-table scan in `database.rs`.
+  - Re-measured against `pgvector/pgvector:pg16` in Docker, 128-dim pseudo-random embeddings, k=10 (`pgvector_compare` group; `archon_ivfflat` bench times search only, index build is untimed setup — same treatment `pgvector_l2`'s bench gives `CREATE INDEX`):
+    - n=1,000: pgvector 527.4µs vs archon_ivfflat 31.8µs — **~16.6x faster**.
+    - n=10,000: pgvector 1.68ms vs archon_ivfflat 288.1µs — **~5.8x faster**.
+    - n=100,000: pgvector 11.6ms vs archon_ivfflat 1.06ms — **~11x faster** (previously ~2.5x *slower* with brute force alone).
+  - Conclusion: the ANN index (not a faster brute-force kernel) is what actually closes the gap `spec.txt`'s "10x pgvector" claim needed — with it in place, that claim now roughly holds at every measured scale, though still worth re-checking against real (non-synthetic) embedding distributions and pgvector's HNSW index type (not just IVFFlat) before treating it as fully proven.
 - [x] WASM playground: `wasm32-unknown-unknown` build of `tpt-archon-core`/`tpt-archon-relational` (core is already `no_std`) + a browser demo — doubles as proof of the embeddability claim ahead of the cortex-m CI target.
 - [x] One-way SQLite `.sqlite` file importer into `Database`/`run_insert` (`crates/tpt-archon-relational/src/database.rs:246-248`) as a low-effort migration bridge — `spec.txt` already flags SQLite compatibility as a deferred phase.

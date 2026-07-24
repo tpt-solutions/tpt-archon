@@ -79,6 +79,8 @@ pub enum PlanNode {
         group_by: Vec<String>,
         /// Aggregate functions to compute.
         aggregates: Vec<(String, crate::parser::AggregateFunc, String)>,
+        /// Optional HAVING filter applied after aggregation.
+        having: Option<Expr>,
         /// Input node.
         input: Box<PlanNode>,
     },
@@ -130,6 +132,11 @@ fn selectivity(expr: &Expr) -> (u64, u64) {
             (n, 100)
         }
         Expr::BetweenInt { .. } => (1, 3),
+        Expr::CmpColumn {
+            op: crate::parser::CmpOp::Eq,
+            ..
+        } => (1, 10),
+        Expr::CmpColumn { .. } => (1, 3),
         Expr::And(l, r) => {
             let (a, b) = selectivity(l);
             let (c, d) = selectivity(r);
@@ -153,6 +160,10 @@ fn selectivity(expr: &Expr) -> (u64, u64) {
             // P(NOT x) = 1 - P(x).
             (b.saturating_sub(a).max(1), b)
         }
+        // Subqueries are evaluated at the database level; default estimate.
+        Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::ScalarCmp { .. } => (1, 3),
+        // Aggregate expressions are resolved after GROUP BY; default estimate.
+        Expr::Agg { .. } => (1, 3),
     }
 }
 
@@ -181,6 +192,7 @@ pub fn plan_select(stmt: &SelectStatement, stats: TableStats) -> Plan {
         node = PlanNode::Aggregate {
             group_by: stmt.group_by.clone(),
             aggregates: stmt.aggregates.clone(),
+            having: stmt.having.clone(),
             input: Box::new(node),
         };
         // Group-by reduces estimated rows.

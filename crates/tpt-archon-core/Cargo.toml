@@ -9,8 +9,8 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 documentation = "https://docs.rs/tpt-archon-core"
-keywords.workspace = true
-categories.workspace = true
+keywords = ["storage-engine", "b-tree", "wal", "no-std", "embedded"]
+categories = ["database-implementations", "no-std", "data-structures", "filesystem"]
 description = "no_std, zero-allocation storage engine: block device, page manager, WAL, B-Link tree"
 
 [features]

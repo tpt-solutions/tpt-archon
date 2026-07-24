@@ -99,6 +99,12 @@ pub enum ExecError {
     TypeMismatch,
     /// A GROUP BY column was not found.
     GroupByColumnNotFound(String),
+    /// An `Expr::Exists`/`InSubquery`/`ScalarCmp` node reached the pure
+    /// evaluator. These require database access to run the inner query and
+    /// must be intercepted by `database::Database::eval_where` before
+    /// reaching here — this variant only guards against that invariant ever
+    /// being violated.
+    UnresolvedSubquery,
 }
 
 /// The result of running a query: output column names and rows.
@@ -114,15 +120,106 @@ pub struct ResultSet {
 // Expression evaluation
 // ---------------------------------------------------------------------------
 
+/// Resolves `name` to a value: an exact column match in `columns`/`row` first;
+/// failing that, a self-qualified match (the segment after the last `.`, so
+/// `orders.user_id` matches a bare `user_id` column); failing that, the same
+/// two checks against `outer` (an enclosing query's columns/row), if given.
+///
+/// This is deliberately name-based, not a real per-table alias binding — the
+/// engine doesn't track table aliases through query scopes today. It's
+/// Walks the scope stack innermost-first: own columns → immediate outer
+/// → grandparent → … until the name is found.
+///
+/// Column names may be table-qualified (e.g. `"t.id"`) or unqualified
+/// (`"id"`). For qualified names, an exact match is tried first; if that
+/// fails the qualifier is stripped and any column whose unqualified part
+/// matches is accepted (for backwards compatibility with code that stores
+/// unqualified names). For unqualified names, a plain match is tried; if
+/// that fails, every column that contains the name after its last `.` is
+/// checked (so `"id"` matches `"t.id"`).
+pub(crate) fn find_value<'a>(
+    name: &str,
+    columns: &[String],
+    row: &'a [Value],
+    outer: &[(&[String], &'a [Value])],
+) -> Option<&'a Value> {
+    // 1. Exact match in local scope.
+    if let Some(idx) = columns.iter().position(|c| c == name) {
+        return Some(&row[idx]);
+    }
+    // 2. If qualified, try each scope checking for an exact qualified match
+    //    on the column name (e.g. "t.id" matches column "t.id").
+    //    This prevents "t.id" from accidentally matching "inner_t.id".
+    if name.contains('.') {
+        // Check if ANY column in the local scope has the full qualified name.
+        if columns.iter().any(|c| c == name) {
+            // Already handled by step 1 above.
+        } else {
+            // Try outer scopes with an exact qualified match first.
+            for (ocols, orow) in outer {
+                if let Some(idx) = ocols.iter().position(|c| c == name) {
+                    return Some(&orow[idx]);
+                }
+            }
+        }
+        // Fall back: strip qualifier and try unqualified match.
+        let stripped = &name[name.rfind('.')? + 1..];
+        if let Some(idx) = columns
+            .iter()
+            .position(|c| c.rfind('.').map_or(c.as_str(), |i| &c[i + 1..]) == stripped)
+        {
+            return Some(&row[idx]);
+        }
+        for (ocols, orow) in outer {
+            if let Some(idx) = ocols
+                .iter()
+                .position(|c| c.rfind('.').map_or(c.as_str(), |i| &c[i + 1..]) == stripped)
+            {
+                return Some(&orow[idx]);
+            }
+        }
+        return None;
+    }
+    // 3. Unqualified name: try exact match, then suffix match.
+    if let Some(idx) = columns
+        .iter()
+        .position(|c| c.rfind('.').map_or(c.as_str(), |i| &c[i + 1..]) == name)
+    {
+        return Some(&row[idx]);
+    }
+    for (ocols, orow) in outer {
+        if let Some(idx) = ocols
+            .iter()
+            .position(|c| c.rfind('.').map_or(c.as_str(), |i| &c[i + 1..]) == name)
+        {
+            return Some(&orow[idx]);
+        }
+    }
+    None
+}
+
 /// Evaluate an `Expr` against a row with the given column names.
 pub fn eval_expr(expr: &Expr, columns: &[String], row: &[Value]) -> Result<bool, ExecError> {
+    eval_expr_scoped(expr, columns, row, &[])
+}
+
+/// Evaluate an `Expr` against a row, with an `outer` scope stack for
+/// correlated-subquery column resolution (see [`find_value`]).
+///
+/// `Exists`/`InSubquery`/`ScalarCmp` need database access to run their inner
+/// query and are never evaluated here — [`crate::database::Database`]
+/// intercepts and resolves them before any leaf node reaches this function.
+pub fn eval_expr_scoped(
+    expr: &Expr,
+    columns: &[String],
+    row: &[Value],
+    outer: &[(&[String], &[Value])],
+) -> Result<bool, ExecError> {
     match expr {
         Expr::Cmp { column, op, value } => {
-            let idx = columns
-                .iter()
-                .position(|c| c == column)
+            let v = find_value(column, columns, row, outer)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
-            match (&row[idx], value) {
+            match (v, value) {
                 (Value::Null, _) => Ok(false),
                 (_, Literal::Null) => Ok(false),
                 (Value::Int(v), Literal::Int(rhs)) => Ok(eval_cmp(*op, *v, *rhs)),
@@ -130,47 +227,66 @@ pub fn eval_expr(expr: &Expr, columns: &[String], row: &[Value]) -> Result<bool,
                 _ => Err(ExecError::TypeMismatch),
             }
         }
+        Expr::CmpColumn { left, op, right } => {
+            let lv = find_value(left, columns, row, outer)
+                .ok_or_else(|| ExecError::UnknownColumn(left.clone()))?;
+            let rv = find_value(right, columns, row, outer)
+                .ok_or_else(|| ExecError::UnknownColumn(right.clone()))?;
+            match (lv, rv) {
+                (Value::Null, _) | (_, Value::Null) => Ok(false),
+                (Value::Int(l), Value::Int(r)) => Ok(eval_cmp(*op, *l, *r)),
+                (Value::Text(l), Value::Text(r)) => Ok(eval_text_cmp(*op, l, r)),
+                _ => Err(ExecError::TypeMismatch),
+            }
+        }
         Expr::IsNull { column, negated } => {
-            let idx = columns
-                .iter()
-                .position(|c| c == column)
+            let v = find_value(column, columns, row, outer)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
-            let is_null = matches!(&row[idx], Value::Null);
+            let is_null = matches!(v, Value::Null);
             Ok(is_null != *negated)
         }
         Expr::Like { column, pattern } => {
-            let idx = columns
-                .iter()
-                .position(|c| c == column)
+            let v = find_value(column, columns, row, outer)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
-            match &row[idx] {
+            match v {
                 Value::Text(t) => Ok(like_match(t, pattern)),
                 _ => Ok(false),
             }
         }
         Expr::InInt { column, values } => {
-            let idx = columns
-                .iter()
-                .position(|c| c == column)
+            let v = find_value(column, columns, row, outer)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
-            match &row[idx] {
+            match v {
                 Value::Int(v) => Ok(values.contains(v)),
                 _ => Ok(false),
             }
         }
         Expr::BetweenInt { column, low, high } => {
-            let idx = columns
-                .iter()
-                .position(|c| c == column)
+            let v = find_value(column, columns, row, outer)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
-            match &row[idx] {
+            match v {
                 Value::Int(v) => Ok(*v >= *low && *v <= *high),
                 _ => Ok(false),
             }
         }
-        Expr::And(l, r) => Ok(eval_expr(l, columns, row)? && eval_expr(r, columns, row)?),
-        Expr::Or(l, r) => Ok(eval_expr(l, columns, row)? || eval_expr(r, columns, row)?),
-        Expr::Not(inner) => Ok(!eval_expr(inner, columns, row)?),
+        Expr::And(l, r) => {
+            Ok(eval_expr_scoped(l, columns, row, outer)?
+                && eval_expr_scoped(r, columns, row, outer)?)
+        }
+        Expr::Or(l, r) => {
+            Ok(eval_expr_scoped(l, columns, row, outer)?
+                || eval_expr_scoped(r, columns, row, outer)?)
+        }
+        Expr::Not(inner) => Ok(!eval_expr_scoped(inner, columns, row, outer)?),
+        Expr::Agg { func, column } => {
+            let name = agg_default_alias(*func, column);
+            find_value(&name, columns, row, outer)
+                .ok_or(ExecError::UnknownColumn(name))
+                .map(|v| !matches!(v, Value::Null))
+        }
+        Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::ScalarCmp { .. } => {
+            Err(ExecError::UnresolvedSubquery)
+        }
     }
 }
 
@@ -227,6 +343,24 @@ fn like_recurse(text: &[u8], pat: &[u8]) -> bool {
 // ---------------------------------------------------------------------------
 // Aggregate evaluation
 // ---------------------------------------------------------------------------
+
+/// Resolves an [`Expr::Agg`] to its default column name (the alias generated
+/// by the parser when no explicit `AS` is given). For explicit aliases, the
+/// user references the alias directly in `HAVING` (e.g. `HAVING cnt > 1`).
+pub(crate) fn agg_default_alias(func: AggregateFunc, column: &str) -> String {
+    let tag = match func {
+        AggregateFunc::Count => "count",
+        AggregateFunc::Sum => "sum",
+        AggregateFunc::Avg => "avg",
+        AggregateFunc::Min => "min",
+        AggregateFunc::Max => "max",
+    };
+    if column == "*" {
+        tag.to_string()
+    } else {
+        alloc::format!("{tag}({column})")
+    }
+}
 
 /// Runs `GROUP BY` + aggregate projection over an in-memory `(columns, rows)`
 /// table, producing the aggregated result. Shared by the executor's own
@@ -455,10 +589,17 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
         PlanNode::Aggregate {
             group_by,
             aggregates,
+            having,
             input,
         } => {
             let inner = execute_node(input, table)?;
-            aggregate_table(&inner.columns, &inner.rows, group_by, aggregates)
+            let mut result = aggregate_table(&inner.columns, &inner.rows, group_by, aggregates)?;
+            if let Some(hv) = having {
+                result
+                    .rows
+                    .retain(|row| eval_expr(hv, &result.columns, row).unwrap_or(false));
+            }
+            Ok(result)
         }
         PlanNode::SubqueryScan { plan, alias } => {
             let inner = execute(plan, table)?;

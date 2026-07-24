@@ -14,6 +14,7 @@ pub mod explain;
 pub mod mvcc;
 pub mod parser;
 pub mod planner;
+pub mod vector_index;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;

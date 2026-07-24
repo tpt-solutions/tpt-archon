@@ -160,6 +160,7 @@ fn fmt_db_error(e: &DbError) -> String {
         DbError::UnknownView(v) => format!("unknown view '{v}'"),
         DbError::RecursiveView(v) => format!("view '{v}' cannot reference itself"),
         DbError::Unsupported(m) => format!("unsupported: {m}"),
+        DbError::SubqueryCardinality(m) => format!("subquery error: {m}"),
         DbError::Exec(e) => format!("execution error: {e:?}"),
     }
 }

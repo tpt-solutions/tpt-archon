@@ -19,6 +19,14 @@ concurrent access to fixed-size pages on a block device.
 - [`btree`](src/btree.rs) — a Lehman & Yao B-Link tree (right-links + high
   keys) with point lookups, range scans and node-splitting inserts. Node
   capacity is checked at compile time to fit within a page.
+- [`storage`](src/storage.rs) — a `StorageEngine` facade wiring the
+  `BufferPool` to the `Wal`: page writes go through the write-ahead log
+  before main storage, and `StorageEngine::recover` replays it after a crash.
+- [`faultsim`](src/faultsim.rs) — a *testing* tool, not a runtime feature:
+  injects power-loss-shaped corruption (truncated tails, flipped bytes,
+  zeroed records) and asserts recovery always yields a prefix-consistent
+  state. The runtime counterpart to the `tpt-telos` replay-consistency
+  harness in `formal-proofs/`.
 
 > **No `tpt-zero-bytes`.** That crate was never built. The zero-allocation
 > primitives live in [`zerocopy`](src/zerocopy.rs) on purpose — do not add a

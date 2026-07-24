@@ -1,0 +1,5 @@
+services:
+  archon-sql:
+    build: .
+    stdin_open: true
+    tty: true

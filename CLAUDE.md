@@ -35,8 +35,11 @@ to resolve those against the real crates.io index (see
 
 ## Workspace layout
 
-Five crates under `crates/`, strictly layered — a crate may only depend on
-crates below it in this list:
+Six crates under `crates/`, strictly layered — a crate may only depend on
+crates below it in this list. Naming convention: crates published to
+crates.io are prefixed `tpt-archon-`; crates that are never published
+(dev/demo tools, the verification harness) are prefixed `out-archon-`
+instead, so publish intent is visible from the crate/directory name alone.
 
 - **tpt-archon-core** — `#![no_std]`, zero-allocation storage engine.
   `block/` (the `BlockDevice` trait + `InMemoryBlockDevice` and a
@@ -60,7 +63,12 @@ crates below it in this list:
   isolation. GPU support is opt-in and only emits TPTIR (via the
   `tpt-gpu-ir-spec` emitter) for an external GPU backend to consume — it is
   not itself a GPU runtime. Depends on all three crates above.
-- **tpt-archon-verify** — *not published* (`publish = false`); a verification
+- **out-archon-sql** — *not published* (`publish = false`); the `archon-sql`
+  interactive SQL REPL binary (the package is named `out-archon-sql`, but the
+  built executable is still `archon-sql` — that's what users type). A demo/
+  adoption tool wrapping `tpt-archon-relational::database::Database`, not one
+  of the layered architecture crates. Depends on `tpt-archon-relational`.
+- **out-archon-verify** — *not published* (`publish = false`); a verification
   harness that pulls in the git-hosted ecosystem verifiers
   (`tpt-eidos-verifier`, `tpt-telos-*`, `tpt-gpu-ir-spec`) to prove invariants
   (B-Link node-capacity fit, WAL replay consistency, MVCC serializability)
@@ -74,15 +82,17 @@ crates below it in this list:
 tpt-archon-relational -> tpt-archon-kernel -> tpt-archon-bridge -> tpt-archon-core
 ```
 
-`tpt-archon-verify` sits off to the side, depending on `tpt-archon-core` and
-(dev-dep) `tpt-archon-relational` but consumed by nothing. Enforced by which
-crates appear in each `Cargo.toml`'s `[dependencies]` — do not add a
+`out-archon-sql` depends only on `tpt-archon-relational` (it's a thin REPL
+wrapper, not a layer anything else builds on). `out-archon-verify` sits off
+to the side, depending on `tpt-archon-core` and (dev-dep)
+`tpt-archon-relational` but consumed by nothing. Enforced by which crates
+appear in each `Cargo.toml`'s `[dependencies]` — do not add a
 reverse-direction dependency.
 
 ### TPT ecosystem crates this workspace depends on
 
 These are verification/tooling deps, pulled in only by the non-published
-`crates/tpt-archon-verify` harness (git deps, pinned to exact commits in that
+`crates/out-archon-verify` harness (git deps, pinned to exact commits in that
 crate's `Cargo.toml` — bump deliberately when an upstream release is
 validated). None of them are runtime dependencies of the shippable crates.
 
@@ -105,7 +115,7 @@ validated). None of them are runtime dependencies of the shippable crates.
 
 See ADR `docs/0003-verification-tested-now-proven-later.md` for the full
 rationale: invariants are implemented and tested/proven in
-`tpt-archon-verify` + `formal-proofs/` now, since `tpt-eidos`/`tpt-telos`
+`out-archon-verify` + `formal-proofs/` now, since `tpt-eidos`/`tpt-telos`
 aren't published crates yet, and crate docs deliberately avoid repeating
 `spec.txt`'s "zero CVE / zero silent corruption" claims until real proofs
 exist.
@@ -127,4 +137,5 @@ clears its "crates.io readiness" checklist in `TODO.md` (metadata, docs,
 examples, `cargo publish --dry-run`). Publishing is manual
 (`.github/workflows/release.yml`, `workflow_dispatch`) — nothing auto-publishes
 on tag push yet, since not every crate is ready at the same time.
-`tpt-archon-verify` is never published (`publish = false`).
+`out-archon-sql` and `out-archon-verify` are never published
+(`publish = false`) — see the crate-naming convention note above.

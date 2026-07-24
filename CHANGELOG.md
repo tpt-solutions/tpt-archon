@@ -38,7 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tested-now-proven-later); `formal-proofs/README.md` tracking intended proof targets.
 
 ### Changed
-- `tpt-archon-verify` moved out of the default workspace (`exclude`) so
+- `out-archon-verify` (formerly `tpt-archon-verify`; renamed to carry the
+  `out-archon-` not-published-crate prefix) moved out of the default workspace
+  (`exclude`) so
   `cargo test --workspace` is offline-clean; it now runs in an opt-in CI job
   with network access for its git-hosted ecosystem verifiers.
 - `README.md` §"TPT ecosystem dependencies" corrected to match `AGENTS.md`:

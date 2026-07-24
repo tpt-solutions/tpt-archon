@@ -9,8 +9,8 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 documentation = "https://docs.rs/tpt-archon-kernel"
-keywords.workspace = true
-categories.workspace = true
+keywords = ["microkernel", "async", "scheduler", "capabilities", "io-uring"]
+categories = ["asynchronous", "concurrency", "os"]
 description = "Capability-based microkernel (user-space first): async scheduler, IPC, unified memory management"
 
 [features]

@@ -9,8 +9,8 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 documentation = "https://docs.rs/tpt-archon-relational"
-keywords.workspace = true
-categories.workspace = true
+keywords = ["sql", "database", "query-engine", "mvcc", "vector-search"]
+categories = ["database-implementations", "algorithms"]
 description = "AI-native relational query engine: SQL parser, planner, vectorized executor, MVCC on tpt-archon"
 
 [features]

@@ -15,6 +15,11 @@ zero-copy IPC and unified memory management gluing the
   double-buffering, plus `CorePageCache`, which adapts the core buffer pool to
   it. A page written via `tpt-archon-core` is visible through the bridge with
   no copy (see the integration test in that module).
+- [`grant`](src/grant.rs) — `CapabilityGrant`, a thin safe layer over
+  `UnifiedPageCache` that bundles the capability check and the page borrow
+  into one call, returning a `MemoryView`/`MemoryViewMut` instead of a raw
+  page reference. No new unsafe code: it's backed by the same safe borrows
+  `map_read`/`map_write` already return.
 
 ## Features
 

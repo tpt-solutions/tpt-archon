@@ -5,31 +5,40 @@ members = [
     "crates/tpt-archon-bridge",
     "crates/tpt-archon-kernel",
     "crates/tpt-archon-relational",
-    "crates/archon-sql",
+    "crates/out-archon-sql",
 ]
 # Benchmarks live in their own crate so Criterion is only built when explicitly
 # running `cargo bench` from `benches/`, keeping the main workspace lean.
 #
-# `tpt-archon-verify` is intentionally NOT a default workspace member: it pulls
-# git-hosted ecosystem verifiers (`tpt-eidos-verifier`, `tpt-telos-*`,
+# Crate naming convention: crates published to crates.io are prefixed
+# `tpt-archon-`; crates that are never published (dev/demo tools, the
+# verification harness) are prefixed `out-archon-` instead, so publish intent
+# is visible from the name/directory alone, not just a `publish = false` line
+# buried in Cargo.toml.
+#
+# `out-archon-verify` is intentionally NOT a default workspace member: it
+# pulls git-hosted ecosystem verifiers (`tpt-eidos-verifier`, `tpt-telos-*`,
 # `tpt-gpu-ir-spec`). If it stayed a member, `cargo test --workspace` would
 # require network access to those git repos on every fresh CI run, breaking the
 # offline-clean adoption story. It is built/tested by an opt-in job in
 # `.github/workflows/ci.yml` (the `verify` job), which has network access.
 # `cargo publish -p tpt-archon-core --dry-run` stays clean because the
 # verifier git deps never enter a shippable crate. See ADR 0003.
-exclude = ["benches", "crates/tpt-archon-verify"]
+exclude = ["benches", "crates/out-archon-verify"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
 license = "MIT OR Apache-2.0"
-authors = ["tpt-solutions"]
+authors = ["TPT Solutions"]
 repository = "https://github.com/tpt-solutions/tpt-archon"
 homepage = "https://github.com/tpt-solutions/tpt-archon"
-keywords = ["database", "storage-engine", "microkernel", "no-std", "formal-verification"]
-categories = ["database-implementations", "no-std", "data-structures"]
+# No shared `keywords`/`categories` here: each published crate does something
+# different enough on crates.io (storage engine vs. IPC glue vs. microkernel
+# vs. SQL engine) that a blanket workspace-wide list would be generic to the
+# point of being wrong for at least three of the four. Each crate's own
+# Cargo.toml sets its own.
 
 [profile.release]
 opt-level = 3

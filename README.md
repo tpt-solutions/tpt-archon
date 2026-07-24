@@ -12,7 +12,7 @@ design document.
 Early but functional across all four crates: each phase's core functionality is
 implemented and tested. External verification crates (`tpt-eidos-verifier`,
 `tpt-telos-*`, `tpt-gpu-ir-spec`) are wired in via the non-published
-`crates/tpt-archon-verify` harness, not the shippable crates. GPU support is
+`crates/out-archon-verify` harness, not the shippable crates. GPU support is
 IR-emission only (no runtime). Nothing here is production-ready; see
 [`TODO.md`](TODO.md) for the live checklist and what is deferred (e.g. GPU
 device execution, real `io_uring`/`mmap` backends, publishing).
@@ -59,7 +59,7 @@ verification tooling from scratch:
 These are verification/tooling deps, **not** runtime deps. None of them are
 pulled into the shippable crates (which must stay `cargo publish`-dry-run
 clean — crates.io rejects git deps even in dev-deps). They live exclusively in
-the non-published `crates/tpt-archon-verify` harness. See AGENTS.md and ADR
+the non-published `crates/out-archon-verify` harness. See AGENTS.md and ADR
 0003.
 
 There is no `tpt-zero-bytes` crate (referenced in the original design doc but
@@ -71,7 +71,7 @@ never built anywhere in the ecosystem); the zero-allocation I/O primitives
 The fastest way to try Archon is the interactive SQL shell:
 
 ```sh
-cargo run -p archon-sql
+cargo run -p out-archon-sql
 ```
 
 This drops you into a REPL where you can create tables, insert data, and run
@@ -87,7 +87,7 @@ SELECT name, age FROM users WHERE age >= 25 ORDER BY age;
 Or run a single statement non-interactively:
 
 ```sh
-cargo run -p archon-sql -e "SELECT 1 + 2;"
+cargo run -p out-archon-sql -e "SELECT 1 + 2;"
 ```
 
 **Which crate should I use?**
@@ -96,9 +96,9 @@ cargo run -p archon-sql -e "SELECT 1 + 2;"
 |---|---|---|
 | Embed a database in your app | `tpt-archon-relational` | [`examples/select_end_to_end.rs`](crates/tpt-archon-relational/examples/select_end_to_end.rs) |
 | Use the storage engine directly | `tpt-archon-core` | [`examples/storage_tour.rs`](crates/tpt-archon-core/examples/storage_tour.rs) |
-| Run SQL interactively | `archon-sql` | `cargo run -p archon-sql` |
+| Run SQL interactively | `archon-sql` (package `out-archon-sql`, not published) | `cargo run -p out-archon-sql` |
 | Scaffold a new project | `template/` | `cargo generate --path template` |
-| Formal-verification harness | `tpt-archon-verify` | `cargo test -p tpt-archon-verify` |
+| Formal-verification harness | `out-archon-verify` (not published) | `cargo test -p out-archon-verify` |
 
 ## Build
 
