@@ -11,7 +11,7 @@
 //! vectorization and (future) GPU-offload decision.
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::parser::{Expr, OrderBy, SelectStatement};

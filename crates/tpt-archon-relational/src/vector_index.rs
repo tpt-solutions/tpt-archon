@@ -49,10 +49,30 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
+/// `f32::sqrt` needs `std`/`libm` and isn't available in this crate's `no_std`
+/// build, so this is a bit-trick initial guess (the classic "fast inverse
+/// square root" magic constant) refined by a few Newton-Raphson iterations —
+/// division and multiplication only, both always available on `f32`. Accurate
+/// to within float rounding error, which is plenty: this only feeds
+/// direction-normalization for clustering, not the final exact-rerank score.
+fn sqrt_f32(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let i = x.to_bits();
+    let i = 0x5f37_59df - (i >> 1);
+    let mut y = f32::from_bits(i);
+    y *= 1.5 - 0.5 * x * y * y;
+    y *= 1.5 - 0.5 * x * y * y;
+    y *= 1.5 - 0.5 * x * y * y;
+    y *= 1.5 - 0.5 * x * y * y;
+    x * y
+}
+
 /// L2-normalizes `v`; returns `v` unchanged if it's the zero vector (nothing
 /// sane to normalize to, and it'll only ever tie every cluster anyway).
 fn normalize(v: &[f32]) -> Vec<f32> {
-    let norm = dot(v, v).sqrt();
+    let norm = sqrt_f32(dot(v, v));
     if norm == 0.0 {
         v.to_vec()
     } else {
@@ -76,9 +96,21 @@ fn nearest_cluster(centroids: &[Vec<f32>], unit_v: &[f32]) -> usize {
 
 /// `sqrt(n)` is the standard IVFFlat rule of thumb (it's what pgvector's own
 /// docs recommend); clamped so build cost stays bounded on very large tables
-/// and so at least one cluster always exists.
+/// and so at least one cluster always exists. Integer binary-search sqrt —
+/// no float division needed here, so no reason to route this through
+/// `sqrt_f32` and its precision caveats.
 fn nlist_for(n: usize) -> usize {
-    ((n as f64).sqrt() as usize).clamp(1, 256)
+    let mut lo = 0usize;
+    let mut hi = n;
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if mid.checked_mul(mid).is_some_and(|sq| sq <= n) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo.clamp(1, 256)
 }
 
 /// Deterministic seeding (no RNG dependency, and reproducible in tests):

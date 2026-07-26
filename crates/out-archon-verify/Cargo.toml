@@ -1,20 +1,28 @@
 [package]
 name = "out-archon-verify"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-rust-version.workspace = true
-authors.workspace = true
-repository.workspace = true
-homepage.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.74"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/tpt-archon"
+homepage = "https://github.com/tpt-solutions/tpt-archon"
 publish = false
 description = "Verification harness for tpt-archon: eidos structural invariants, telos formal proofs, and GPU IR emission smoke tests"
 
-# This crate is intentionally NOT published. It depends on git-hosted
-# ecosystem verifiers (tpt-eidos-verifier, tpt-telos-*, tpt-gpu-ir-spec), and
-# crates.io rejects git dependencies even in dev-dependencies. Keeping the
-# verification harness here (instead of in the shippable crates) is what lets
-# `cargo publish -p tpt-archon-core --dry-run` stay clean. See ADR 0003.
+# This crate is intentionally NOT published, and (see root Cargo.toml's
+# `exclude`) intentionally NOT a member of the root workspace either: it
+# depends on git-hosted ecosystem verifiers (tpt-eidos-verifier, tpt-telos-*,
+# tpt-gpu-ir-spec), and crates.io rejects git dependencies even in
+# dev-dependencies, so keeping it out of the workspace is what lets
+# `cargo publish -p tpt-archon-core --dry-run` stay clean (see ADR 0003).
+#
+# Because it's excluded, it can't use `field.workspace = true` inheritance
+# above — Cargo only resolves that for actual workspace members, and this
+# crate is built standalone (`cd crates/out-archon-verify && cargo test`, or
+# `cargo test -p out-archon-verify --manifest-path crates/out-archon-verify/Cargo.toml`
+# from the repo root) precisely because it isn't one. Update these fields by
+# hand if the workspace-wide values in the root `Cargo.toml` change.
 
 [dependencies]
 tpt-archon-core = { path = "../tpt-archon-core", default-features = false }
