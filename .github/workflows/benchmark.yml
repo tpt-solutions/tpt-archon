@@ -1,0 +1,50 @@
+name: Benchmark trend
+
+# Tracks the `storage`/`query` Criterion benchmarks (see benches/README.md)
+# over time so the "30% faster than PostgreSQL" / "2x SQLite" claims in
+# spec.txt's "Success Metrics" have a running trend line, not just a
+# point-in-time number in TODO.md. Runs on every push to main (not PRs —
+# publishing needs `contents: write` on the `gh-pages` branch, which PR runs
+# from forks don't have) and alerts on the PR itself when a regression is
+# detected, via a comment from the workflow's own token.
+#
+# `vector_compare` is intentionally excluded here: it needs external
+# PostgreSQL/SQLite instances behind feature flags and is a comparison
+# benchmark, not a self-trend one — see benches/README.md.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  deployments: write
+
+jobs:
+  benchmark:
+    name: Run Criterion benchmarks and publish trend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run benchmarks (bencher-compatible output)
+        working-directory: benches
+        run: |
+          cargo bench --bench storage --bench query -- --output-format bencher | tee ../output.txt
+      - name: Store benchmark result and publish to GitHub Pages
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: "cargo"
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: benchmarks
+          auto-push: true
+          # Comment + fail the job on a >150% regression so a slowdown is
+          # visible without having to go dig through the trend chart.
+          alert-threshold: "150%"
+          comment-on-alert: true
+          fail-on-alert: false
+          summary-always: true

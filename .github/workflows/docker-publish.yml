@@ -1,14 +1,19 @@
 name: Docker publish
 
-# Manual-dispatch only, matching the "publishing is manual" convention in
-# release.yml/CLAUDE.md — nothing auto-publishes on tag/push. Builds the
-# root Dockerfile (archon-sql REPL) and pushes to GHCR using the built-in
-# GITHUB_TOKEN, so no extra registry secret is required.
+# Auto-publishes on a `v*` tag push (e.g. `v0.1.0`) so a pre-built image is
+# available the moment a release is cut, without changing the manual-only
+# convention for crates.io publishing in release.yml/CLAUDE.md — this is the
+# demo/adoption image (archon-sql REPL), not a crates.io package, so it's held
+# to a looser bar. `workflow_dispatch` is kept for building/trying an
+# untagged or ad hoc image without cutting a release.
 #
-# Trigger by hand from the Actions tab once a build is ready to be tried
-# without a local `docker build`.
+# Pushes to GHCR using the built-in GITHUB_TOKEN, so no extra registry
+# secret is required.
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -35,9 +40,19 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=match,pattern=v(.*),group=1
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.tag }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
