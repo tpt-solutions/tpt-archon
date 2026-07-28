@@ -92,16 +92,27 @@ pub fn trial<D: BlockDevice + Clone>(
     let mut e2 = StorageEngine::new(device, committed.max(1) + 1);
     let applied = e2.recover(&corrupted).unwrap();
 
-    // Reconstruct what each committed block *should* hold from the intact log.
-    let wal = Wal::from_bytes(&log);
+    // Reconstruct what each block *should* hold after recovering the
+    // (possibly torn) `corrupted` log: a `PageWrite` only counts once an
+    // intact `Commit`/`Checkpoint` follows it, mirroring `recover`'s own
+    // commit-gating — a `PageWrite` whose trailing commit marker landed in
+    // the torn tail must not be expected to have replayed either.
+    let wal = Wal::from_bytes(&corrupted);
     let mut expected: Vec<Option<u8>> = (0..committed).map(|_| None).collect();
-    wal.replay(|rec| {
-        if rec.kind == crate::wal::RecordKind::PageWrite {
-            let idx = rec.block_id as usize;
-            if idx < expected.len() && !rec.payload.is_empty() {
-                expected[idx] = Some(rec.payload[0]);
+    let mut pending: Vec<(u64, u8)> = Vec::new();
+    wal.replay(|rec| match rec.kind {
+        crate::wal::RecordKind::PageWrite if !rec.payload.is_empty() => {
+            pending.push((rec.block_id, rec.payload[0]));
+        }
+        crate::wal::RecordKind::Commit | crate::wal::RecordKind::Checkpoint => {
+            for (block_id, byte) in pending.drain(..) {
+                let idx = block_id as usize;
+                if idx < expected.len() {
+                    expected[idx] = Some(byte);
+                }
             }
         }
+        _ => {}
     });
 
     (applied, expected)

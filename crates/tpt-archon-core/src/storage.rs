@@ -9,6 +9,8 @@
 //! features required), so it can sit on top of the in-memory or file-backed
 //! [`BlockDevice`](crate::block::BlockDevice) interchangeably.
 
+use alloc::vec::Vec;
+
 use crate::block::{BlockDevice, BlockId, StorageError};
 use crate::page::{BufferPool, PAGE_SIZE};
 use crate::wal::{RecordKind, Wal};
@@ -74,25 +76,44 @@ impl<D: BlockDevice> StorageEngine<D> {
 
     /// Rebuilds the engine's in-memory WAL from previously persisted log bytes
     /// (a torn tail is truncated by [`Wal::from_bytes`]) and replays every
-    /// intact `PageWrite` record back into the device, restoring the last
-    /// committed page images. After recovery the device reflects all durable
-    /// writes; uncommitted trailing pages are dropped.
+    /// `PageWrite` record that is followed by a `Commit` (or `Checkpoint`)
+    /// record back into the device, restoring the last committed page images.
+    ///
+    /// A `PageWrite` is only applied once an intact `Commit`/`Checkpoint`
+    /// record for it is seen later in the log; any `PageWrite`s with no such
+    /// record following them (a crash between [`write_page`](Self::write_page)
+    /// and [`commit`](Self::commit) leaves a fully-formed, non-torn
+    /// `PageWrite` record with no trailing commit marker) are dropped, same as
+    /// a torn/corrupt tail is. After recovery the device reflects exactly the
+    /// durable, committed writes.
     pub fn recover(&mut self, log_bytes: &[u8]) -> Result<usize, StorageError> {
         let wal = Wal::from_bytes(log_bytes);
         let mut applied = 0usize;
-        wal.replay(|rec| {
-            if rec.kind == RecordKind::PageWrite && rec.payload.len() == PAGE_SIZE {
-                // Apply the page image directly to the device. We bypass the
-                // pool so recovery is independent of pool capacity and order.
-                if self
-                    .pool
-                    .device_mut()
-                    .write_block(rec.block_id, &rec.payload)
-                    .is_ok()
-                {
-                    applied += 1;
+        // Writes are buffered until a Commit/Checkpoint proves them durable;
+        // a PageWrite with no later commit marker (crash before commit, or a
+        // torn tail that swallowed the commit marker itself) is never
+        // flushed to the device.
+        let mut pending: Vec<(BlockId, Vec<u8>)> = Vec::new();
+        wal.replay(|rec| match rec.kind {
+            RecordKind::PageWrite if rec.payload.len() == PAGE_SIZE => {
+                pending.push((rec.block_id, rec.payload.clone()));
+            }
+            RecordKind::Commit | RecordKind::Checkpoint => {
+                for (block_id, payload) in pending.drain(..) {
+                    // Apply the page image directly to the device. We bypass
+                    // the pool so recovery is independent of pool capacity
+                    // and order.
+                    if self
+                        .pool
+                        .device_mut()
+                        .write_block(block_id, &payload)
+                        .is_ok()
+                    {
+                        applied += 1;
+                    }
                 }
             }
+            _ => {}
         });
         self.wal = wal;
         Ok(applied)
@@ -164,6 +185,10 @@ mod tests {
 
     #[test]
     fn recover_ignores_torn_tail() {
+        // The corruption below lands on the trailing Commit record itself (a
+        // single PageWrite + Commit is a short log), so with commit-gated
+        // replay this is indistinguishable from "crashed before commit": the
+        // page write must be dropped, not applied.
         let dev = InMemoryBlockDevice::new(4);
         let mut e = StorageEngine::new(dev.clone(), 2);
         e.write_page(0, &page_of(0x07)).unwrap();
@@ -177,8 +202,40 @@ mod tests {
 
         let mut e2 = StorageEngine::new(dev, 2);
         let n = e2.recover(&log).unwrap();
-        assert_eq!(n, 1, "torn tail truncated to the durable prefix");
-        assert_eq!(e2.read_page(0).unwrap()[0], 0x07);
+        assert_eq!(
+            n, 0,
+            "the only page write's commit marker was torn, so it must not be replayed"
+        );
+        // Device was never touched, so this reads the pool's zero-initialized
+        // default rather than the uncommitted 0x07 image.
+        assert_eq!(e2.read_page(0).unwrap()[0], 0x00);
+    }
+
+    #[test]
+    fn recover_drops_page_write_with_no_following_commit() {
+        // Regression test for security-audit finding 2: `write_page` appends
+        // the WAL record before `commit` is ever called, so a crash between
+        // the two leaves a fully-formed, non-torn `PageWrite` record with no
+        // trailing `Commit`. Replay must drop it, not apply it as if durable.
+        let dev = InMemoryBlockDevice::new(4);
+        let log;
+        {
+            let mut e = StorageEngine::new(dev.clone(), 2);
+            e.write_page(0, &page_of(0x01)).unwrap();
+            e.commit().unwrap();
+            // A second write with no matching commit — simulates a crash
+            // between `write_page` and `commit`.
+            e.write_page(1, &page_of(0x02)).unwrap();
+            log = e.wal_bytes().to_vec();
+        }
+
+        let mut e2 = StorageEngine::new(dev, 2);
+        let n = e2.recover(&log).unwrap();
+        assert_eq!(n, 1, "only the committed write (block 0) should replay");
+        assert_eq!(e2.read_page(0).unwrap()[0], 0x01);
+        // Block 1's write was never committed, so it must not have reached
+        // the device — this reads back the zero-initialized default.
+        assert_eq!(e2.read_page(1).unwrap()[0], 0x00);
     }
 }
 

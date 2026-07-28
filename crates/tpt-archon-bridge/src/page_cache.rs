@@ -12,7 +12,7 @@
 use tpt_archon_core::block::{BlockDevice, StorageError};
 use tpt_archon_core::page::{BufferPool, Page};
 
-use crate::capability::{Capability, Resource, Right};
+use crate::capability::{Capability, Resource, Right, SharedIssuer};
 
 /// Error accessing a page through the unified cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,12 +55,15 @@ pub trait UnifiedPageCache {
 /// copy.
 pub struct CorePageCache<D: BlockDevice> {
     pool: BufferPool<D>,
+    issuer: SharedIssuer,
 }
 
 impl<D: BlockDevice> CorePageCache<D> {
-    /// Wraps a core buffer pool.
-    pub fn new(pool: BufferPool<D>) -> Self {
-        Self { pool }
+    /// Wraps a core buffer pool, gating every access against `issuer` so a
+    /// capability revoked after being minted is rejected here — not just in
+    /// `CapabilityIssuer::validate` calls the enforcement path never reaches.
+    pub fn new(pool: BufferPool<D>, issuer: SharedIssuer) -> Self {
+        Self { pool, issuer }
     }
 
     /// Returns the wrapped pool.
@@ -71,14 +74,22 @@ impl<D: BlockDevice> CorePageCache<D> {
 
 impl<D: BlockDevice> UnifiedPageCache for CorePageCache<D> {
     fn map_read(&mut self, cap: &Capability, block_id: u64) -> Result<&Page, CacheError> {
-        if !cap.authorizes(Resource::Page(block_id), Right::Read) {
+        if !self
+            .issuer
+            .borrow()
+            .authorizes(cap, Resource::Page(block_id), Right::Read)
+        {
             return Err(CacheError::Denied);
         }
         Ok(self.pool.fetch(block_id)?)
     }
 
     fn map_write(&mut self, cap: &Capability, block_id: u64) -> Result<&mut Page, CacheError> {
-        if !cap.authorizes(Resource::Page(block_id), Right::Write) {
+        if !self
+            .issuer
+            .borrow()
+            .authorizes(cap, Resource::Page(block_id), Right::Write)
+        {
             return Err(CacheError::Denied);
         }
         Ok(self.pool.fetch_mut(block_id)?)
@@ -93,17 +104,24 @@ impl<D: BlockDevice> UnifiedPageCache for CorePageCache<D> {
 mod tests {
     use super::*;
     use crate::capability::CapabilityIssuer;
+    use alloc::rc::Rc;
+    use core::cell::RefCell;
     use tpt_archon_core::block::InMemoryBlockDevice;
 
-    fn cache(blocks: u64, cap: usize) -> CorePageCache<InMemoryBlockDevice> {
-        CorePageCache::new(BufferPool::new(InMemoryBlockDevice::new(blocks), cap))
+    fn cache(blocks: u64, cap: usize, issuer: SharedIssuer) -> CorePageCache<InMemoryBlockDevice> {
+        CorePageCache::new(
+            BufferPool::new(InMemoryBlockDevice::new(blocks), cap),
+            issuer,
+        )
     }
 
     #[test]
     fn write_then_read_is_zero_copy_visible() {
-        let mut issuer = CapabilityIssuer::new();
-        let rw = issuer.mint(Resource::Page(2), Right::ReadWrite);
-        let mut c = cache(8, 4);
+        let issuer = Rc::new(RefCell::new(CapabilityIssuer::new()));
+        let rw = issuer
+            .borrow_mut()
+            .mint(Resource::Page(2), Right::ReadWrite);
+        let mut c = cache(8, 4, issuer);
 
         {
             let page = c.map_write(&rw, 2).unwrap();
@@ -118,11 +136,35 @@ mod tests {
 
     #[test]
     fn access_without_capability_is_denied() {
-        let mut issuer = CapabilityIssuer::new();
-        let read_only = issuer.mint(Resource::Page(0), Right::Read);
-        let mut c = cache(4, 2);
+        let issuer = Rc::new(RefCell::new(CapabilityIssuer::new()));
+        let read_only = issuer.borrow_mut().mint(Resource::Page(0), Right::Read);
+        let mut c = cache(4, 2, issuer);
         assert_eq!(c.map_write(&read_only, 0).err(), Some(CacheError::Denied));
         // Wrong page.
         assert_eq!(c.map_read(&read_only, 1).err(), Some(CacheError::Denied));
+    }
+
+    #[test]
+    fn revoked_capability_is_denied_at_map_read_and_map_write() {
+        // Regression test for security-audit finding 1: `revoke` must have an
+        // effect at the real enforcement point, not just when
+        // `CapabilityIssuer::validate` is called directly.
+        let issuer = Rc::new(RefCell::new(CapabilityIssuer::new()));
+        let rw = issuer
+            .borrow_mut()
+            .mint(Resource::Page(0), Right::ReadWrite);
+        let mut c = cache(4, 2, issuer.clone());
+
+        // Live capability works.
+        c.map_write(&rw, 0).unwrap();
+        c.unmap(0);
+        c.map_read(&rw, 0).unwrap();
+        c.unmap(0);
+
+        // Revoke, then the *same* structurally-valid capability must be
+        // rejected by the cache itself.
+        issuer.borrow_mut().revoke(&rw);
+        assert_eq!(c.map_read(&rw, 0).err(), Some(CacheError::Denied));
+        assert_eq!(c.map_write(&rw, 0).err(), Some(CacheError::Denied));
     }
 }

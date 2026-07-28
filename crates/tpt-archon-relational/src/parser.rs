@@ -425,14 +425,45 @@ enum Tok<'a> {
     Eof,
 }
 
+/// Maximum recursive-descent nesting depth for expression/subquery parsing
+/// (parenthesized sub-expressions, chained `NOT`, and nested subqueries all
+/// share this budget). Generous enough for any realistic query, but far short
+/// of stack-overflow territory — without this, pathological input (e.g.
+/// 50,000 nested parens) drives the call stack to depth O(N) and aborts the
+/// process instead of returning a `ParseError`.
+const MAX_PARSE_DEPTH: u32 = 100;
+
 struct Lexer<'a> {
     s: &'a str,
     pos: usize,
+    depth: u32,
 }
 
 impl<'a> Lexer<'a> {
     fn new(s: &'a str) -> Self {
-        Self { s, pos: 0 }
+        Self {
+            s,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    /// Enters one level of recursive-descent expression/subquery parsing,
+    /// failing with a `ParseError` (rather than recursing further) once
+    /// [`MAX_PARSE_DEPTH`] is exceeded. Must be paired with [`Self::exit_depth`].
+    fn enter_depth(&mut self) -> Result<(), ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(ParseError(
+                "expression or subquery nesting too deep".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Leaves one level entered via [`Self::enter_depth`].
+    fn exit_depth(&mut self) {
+        self.depth -= 1;
     }
 
     fn bytes(&self) -> &'a [u8] {
@@ -647,7 +678,14 @@ fn is_kw(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_expr(lx: &mut Lexer) -> Result<Expr, ParseError> {
-    parse_or(lx)
+    // Guards parenthesized sub-expression recursion (`parse_primary_expr`'s
+    // `LParen` arm calls straight back into `parse_expr`) and subquery WHERE/
+    // HAVING/ON recursion (every subquery entry point re-enters expression
+    // parsing through here).
+    lx.enter_depth()?;
+    let result = parse_or(lx);
+    lx.exit_depth();
+    result
 }
 
 fn parse_or(lx: &mut Lexer) -> Result<Expr, ParseError> {
@@ -715,8 +753,14 @@ fn parse_and(lx: &mut Lexer) -> Result<Expr, ParseError> {
 fn parse_not(lx: &mut Lexer) -> Result<Expr, ParseError> {
     match lx.next_tok()? {
         Tok::Ident(kw) if eq_ignore_case(kw, "not") => {
-            let inner = parse_not(lx)?;
-            Ok(Expr::Not(Box::new(inner)))
+            // `parse_not` recurses directly into itself for each leading
+            // `NOT` (chained `NOT NOT ... x`), never passing back through
+            // `parse_expr`'s depth guard — so a chain of `NOT`s needs its
+            // own guard here to bound the recursion.
+            lx.enter_depth()?;
+            let inner = parse_not(lx);
+            lx.exit_depth();
+            Ok(Expr::Not(Box::new(inner?)))
         }
         tok => {
             push_back(lx, tok);
@@ -1245,6 +1289,17 @@ fn parse_delete(mut lx: Lexer) -> Result<DeleteStatement, ParseError> {
 // ---------------------------------------------------------------------------
 
 fn parse_select_inner(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
+    // Guards subquery nesting that doesn't otherwise pass through
+    // `parse_expr` (e.g. `FROM (SELECT * FROM (SELECT ...) AS x) AS y`, or a
+    // chain of CTEs), on top of the guard already applied to any WHERE/
+    // HAVING/ON expression a subquery contains.
+    lx.enter_depth()?;
+    let result = parse_select_inner_impl(lx);
+    lx.exit_depth();
+    result
+}
+
+fn parse_select_inner_impl(lx: &mut Lexer) -> Result<SelectStatement, ParseError> {
     // Columns or *.
     let mut columns = Vec::new();
     let mut star = false;
@@ -2062,5 +2117,87 @@ mod tests {
             parse_select("SELECT dept, COUNT(*) FROM t GROUP BY dept HAVING COUNT(*) > 1").unwrap();
         assert!(s.having.is_some());
         assert_eq!(s.group_by, alloc::vec!["dept".to_string()]);
+    }
+
+    // Regression tests for unbounded recursive-descent parsing (security
+    // audit finding 3): pathological nesting must return a `ParseError`, not
+    // blow the call stack.
+
+    #[test]
+    fn deeply_nested_parens_in_where_returns_parse_error_not_stack_overflow() {
+        let depth = 50_000;
+        let mut sql = "SELECT * FROM t WHERE ".to_string();
+        for _ in 0..depth {
+            sql.push('(');
+        }
+        sql.push_str("a = 1");
+        for _ in 0..depth {
+            sql.push(')');
+        }
+        let r = parse_statement(&sql);
+        assert!(r.is_err(), "50,000 nested parens must be rejected");
+    }
+
+    #[test]
+    fn long_not_chain_returns_parse_error_not_stack_overflow() {
+        let depth = 50_000;
+        let mut sql = "SELECT * FROM t WHERE ".to_string();
+        for _ in 0..depth {
+            sql.push_str("NOT ");
+        }
+        sql.push_str("a = 1");
+        let r = parse_statement(&sql);
+        assert!(r.is_err(), "50,000 chained NOTs must be rejected");
+    }
+
+    #[test]
+    fn deeply_nested_exists_subquery_returns_parse_error_not_stack_overflow() {
+        let depth = 5_000;
+        let mut sql = "SELECT * FROM t WHERE ".to_string();
+        for _ in 0..depth {
+            sql.push_str("EXISTS (SELECT * FROM t2 WHERE ");
+        }
+        sql.push_str("a = 1");
+        for _ in 0..depth {
+            sql.push(')');
+        }
+        let r = parse_statement(&sql);
+        assert!(
+            r.is_err(),
+            "5,000 nested EXISTS subqueries must be rejected"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_from_subquery_returns_parse_error_not_stack_overflow() {
+        let depth = 5_000;
+        let mut sql = "SELECT * FROM ".to_string();
+        for _ in 0..depth {
+            sql.push_str("(SELECT * FROM ");
+        }
+        sql.push('t');
+        for i in 0..depth {
+            sql.push_str(") AS x");
+            sql.push_str(&i.to_string());
+        }
+        let r = parse_statement(&sql);
+        assert!(r.is_err(), "5,000 nested FROM-subqueries must be rejected");
+    }
+
+    #[test]
+    fn moderate_nesting_still_parses_successfully() {
+        // A depth well under the limit must still parse fine — the guard
+        // should not affect any realistic query.
+        let depth = 50;
+        let mut sql = "SELECT * FROM t WHERE ".to_string();
+        for _ in 0..depth {
+            sql.push('(');
+        }
+        sql.push_str("a = 1");
+        for _ in 0..depth {
+            sql.push(')');
+        }
+        let r = parse_statement(&sql);
+        assert!(r.is_ok(), "moderate nesting should still parse: {r:?}");
     }
 }

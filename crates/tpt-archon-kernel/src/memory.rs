@@ -52,17 +52,21 @@ impl<C: UnifiedPageCache> UnifiedMemory<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::rc::Rc;
+    use core::cell::RefCell;
     use tpt_archon_bridge::capability::{CapabilityIssuer, Resource, Right};
-    use tpt_archon_bridge::page_cache::CorePageCache;
+    use tpt_archon_bridge::page_cache::{CacheError, CorePageCache};
     use tpt_archon_core::block::InMemoryBlockDevice;
     use tpt_archon_core::page::BufferPool;
 
     #[test]
     fn unified_memory_shares_storage_pages() {
-        let mut issuer = CapabilityIssuer::new();
-        let rw = issuer.mint(Resource::Page(1), Right::ReadWrite);
+        let issuer = Rc::new(RefCell::new(CapabilityIssuer::new()));
+        let rw = issuer
+            .borrow_mut()
+            .mint(Resource::Page(1), Right::ReadWrite);
 
-        let cache = CorePageCache::new(BufferPool::new(InMemoryBlockDevice::new(4), 2));
+        let cache = CorePageCache::new(BufferPool::new(InMemoryBlockDevice::new(4), 2), issuer);
         let mut mem = UnifiedMemory::new(cache);
 
         {
@@ -74,5 +78,28 @@ mod tests {
         let page = mem.map_read(&rw, 1).unwrap();
         assert_eq!(page.as_bytes()[0], 0x5A);
         mem.unmap(1);
+    }
+
+    #[test]
+    fn unified_memory_denies_revoked_capability() {
+        // Regression test for security-audit finding 1: `UnifiedMemory`
+        // delegates straight to the underlying `UnifiedPageCache`, so a
+        // revoked capability must be denied here too, not just when the
+        // issuer is consulted directly.
+        let issuer = Rc::new(RefCell::new(CapabilityIssuer::new()));
+        let rw = issuer
+            .borrow_mut()
+            .mint(Resource::Page(1), Right::ReadWrite);
+
+        let cache = CorePageCache::new(
+            BufferPool::new(InMemoryBlockDevice::new(4), 2),
+            issuer.clone(),
+        );
+        let mut mem = UnifiedMemory::new(cache);
+
+        mem.map_write(&rw, 1).unwrap();
+        issuer.borrow_mut().revoke(&rw);
+        assert_eq!(mem.map_read(&rw, 1).err(), Some(CacheError::Denied));
+        assert_eq!(mem.map_write(&rw, 1).err(), Some(CacheError::Denied));
     }
 }

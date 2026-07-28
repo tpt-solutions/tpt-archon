@@ -265,4 +265,48 @@ CI automation, differentiation ideas). Ordered de-risk-first.
     - n=100,000: pgvector 11.6ms vs archon_ivfflat 1.06ms — **~11x faster** (previously ~2.5x *slower* with brute force alone).
   - Conclusion: the ANN index (not a faster brute-force kernel) is what actually closes the gap `spec.txt`'s "10x pgvector" claim needed — with it in place, that claim now roughly holds at every measured scale, though still worth re-checking against real (non-synthetic) embedding distributions and pgvector's HNSW index type (not just IVFFlat) before treating it as fully proven.
 - [x] WASM compile check: CI's `wasm` job (`cargo check -p tpt-archon-relational --no-default-features --target wasm32-unknown-unknown`) proves the stack compiles for the target, ahead of the cortex-m CI target. **Correction (this review): there is no browser demo** — no `wasm-bindgen`/`wasm-pack` glue or demo page exists anywhere in the repo; this line previously overstated what's built. A real "WASM playground" (bindgen bindings + an actual page exercising `Database` in a browser) is still open work, not done.
+
+---
+
+## Phase 7 — Security audit follow-ups (2026-07-28)
+
+Three real bugs from an ad hoc security audit (not previously tracked here).
+
+- [x] **Capability revocation was never enforced.** `Capability::authorizes` is a
+  stateless structural check; only `CapabilityIssuer::validate` consulted the
+  live/revoked set, and it was called nowhere except its own unit tests — every
+  real enforcement point (`CorePageCache::map_read`/`map_write`,
+  `MessageRouter::send`/`receive`, `UnifiedMemory`, the `CapabilityGrant`
+  blanket impl) checked only `authorizes`, so `revoke` had no effect anywhere
+  that mattered. Fixed by adding `CapabilityIssuer::authorizes` (liveness +
+  structural check combined) and threading a shared `SharedIssuer`
+  (`Rc<RefCell<CapabilityIssuer>>` — matches the crate's existing single-
+  threaded, no_std-friendly concurrency model) into `CorePageCache` and
+  `MessageRouter`, which now call it instead of `Capability::authorizes`
+  directly. `UnifiedMemory` and `CapabilityGrant` inherit the fix for free
+  since they delegate straight through. Updated the `multi_tenant` example,
+  which previously hand-rolled an external "ask the issuer first" gate around
+  an unenforced cache — it now demonstrates the cache itself denying a revoked
+  capability.
+- [x] **WAL replay didn't check for a Commit marker.** `StorageEngine::recover`
+  replayed every intact `PageWrite` record regardless of whether a `Commit`
+  record ever followed it; `write_page` appends the WAL record before
+  `commit()` runs, so a crash between the two left a fully-formed,
+  non-torn `PageWrite` that got replayed as if durable — contradicting the
+  module's own "uncommitted trailing pages are dropped" doc comment, which
+  only torn/corrupted tails actually satisfied. Fixed by buffering
+  `PageWrite` records during replay and only flushing them to the device once
+  an intact `Commit`/`Checkpoint` record is seen later in the log; anything
+  left pending at the end of the log (no txn_id/grouping field existed or was
+  needed — writes are batch-committed, so LSN order alone is enough) is
+  dropped, same as a torn tail already was.
+- [x] **Unbounded recursive-descent parsing could stack-overflow.** Chained
+  `NOT` (`parse_not` recursing into itself) and parenthesized sub-expressions
+  (`parse_primary_expr`'s `LParen` arm recursing into `parse_expr`) had no
+  depth limit, and neither did subquery nesting (`EXISTS`, `IN (SELECT ...)`,
+  scalar subqueries, `FROM` derived tables, CTEs) — pathological SQL text
+  alone could abort the process with an uncatchable stack overflow during
+  parsing. Fixed with a shared depth counter on `Lexer` (`MAX_PARSE_DEPTH =
+  100`, checked in `parse_expr`, `parse_not`, and `parse_select_inner`),
+  returning a normal `ParseError` once exceeded instead of recursing further.
 - [x] One-way SQLite `.sqlite` file importer into `Database`/`run_insert` (`crates/tpt-archon-relational/src/database.rs:246-248`) as a low-effort migration bridge — `spec.txt` already flags SQLite compatibility as a deferred phase.
