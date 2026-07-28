@@ -110,6 +110,7 @@ available via manual dispatch for an ad hoc build in between releases).
 | Run SQL interactively | `archon-sql` (package `out-archon-sql`, not published) | `cargo run -p out-archon-sql` |
 | Try it in a browser, no install | `out-archon-wasm` (not published) | [`crates/out-archon-wasm/www/`](crates/out-archon-wasm/www/) — see that crate's README to build/serve it |
 | Use Archon from Python | `archon-db` (package `out-archon-py`, PyO3 bindings, not yet on PyPI) | [`crates/out-archon-py/README.md`](crates/out-archon-py/README.md) |
+| Embed the database from Node.js | `archon-db` (package `out-archon-node`, not published to crates.io -- ships to npm) | [`crates/out-archon-node/README.md`](crates/out-archon-node/README.md) |
 | Scaffold a new project | `template/` | `cargo generate --path template` |
 | Formal-verification harness | `out-archon-verify` (not published) | `cargo test -p out-archon-verify` |
 
