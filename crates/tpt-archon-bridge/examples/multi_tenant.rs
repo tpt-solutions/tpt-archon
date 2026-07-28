@@ -7,8 +7,11 @@
 //!
 //! Run with: `cargo run -p tpt-archon-bridge --example multi_tenant`
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use tpt_archon_bridge::capability::{CapabilityIssuer, Resource, Right};
-use tpt_archon_bridge::page_cache::{CorePageCache, UnifiedPageCache};
+use tpt_archon_bridge::page_cache::{CacheError, CorePageCache, UnifiedPageCache};
 use tpt_archon_core::block::InMemoryBlockDevice;
 use tpt_archon_core::page::BufferPool;
 
@@ -46,17 +49,24 @@ impl Tenant {
 }
 
 fn main() {
-    let mut issuer = CapabilityIssuer::new();
-    let mut cache = CorePageCache::new(BufferPool::new(InMemoryBlockDevice::new(8), 4));
+    let issuer = Rc::new(RefCell::new(CapabilityIssuer::new()));
+    let mut cache = CorePageCache::new(
+        BufferPool::new(InMemoryBlockDevice::new(8), 4),
+        issuer.clone(),
+    );
 
     // Issuer grants each tenant a capability scoped to exactly one page.
     let alice = Tenant {
         name: "alice",
-        caps: vec![issuer.mint(Resource::Page(0), Right::ReadWrite)],
+        caps: vec![issuer
+            .borrow_mut()
+            .mint(Resource::Page(0), Right::ReadWrite)],
     };
     let bob = Tenant {
         name: "bob",
-        caps: vec![issuer.mint(Resource::Page(1), Right::ReadWrite)],
+        caps: vec![issuer
+            .borrow_mut()
+            .mint(Resource::Page(1), Right::ReadWrite)],
     };
 
     // Each tenant writes only to its own page — same cache, no cross-talk.
@@ -87,34 +97,28 @@ fn main() {
         alice_tries_bob.is_none()
     );
 
-    // Revocation: a real kernel re-validates a capability against its issuer on
-    // every use, so a revoked capability is rejected before it ever reaches the
-    // cache. The cache itself trusts the capability's embedded authorization
-    // (it cannot see the issuer), so the issuer check is the enforcer.
+    // Revocation: the cache shares `issuer` (a `Rc<RefCell<CapabilityIssuer>>`)
+    // and checks liveness on every `map_read`/`map_write` call, so `revoke`
+    // takes effect immediately at the real enforcement point — no separate,
+    // easy-to-forget "ask the issuer first" step required by the caller.
     let alice_cap = alice.caps[0];
-    assert!(issuer.validate(&alice_cap));
-    issuer.revoke(&alice_cap);
+    assert!(issuer.borrow().validate(&alice_cap));
+    issuer.borrow_mut().revoke(&alice_cap);
     assert!(
-        !issuer.validate(&alice_cap),
+        !issuer.borrow().validate(&alice_cap),
         "revoked cap no longer vouched for"
     );
 
-    // Simulate the kernel's gate: only present the cap to the cache if the
-    // issuer still validates it.
-    let allowed = issuer.validate(&alice_cap);
-    let read_after_revoke = if allowed {
-        cache.map_read(&alice_cap, 0).map(|p| p.as_bytes()[0]).ok()
-    } else {
-        None
-    };
+    // The same, structurally-unchanged capability is now rejected by the
+    // cache itself, without any extra gating logic at the call site.
+    let read_after_revoke = cache.map_read(&alice_cap, 0).map(|p| p.as_bytes()[0]);
+    let was_denied = read_after_revoke.is_err();
     assert_eq!(
-        read_after_revoke, None,
-        "revoked capability must not reach the page"
+        read_after_revoke.err(),
+        Some(CacheError::Denied),
+        "revoked capability must be denied by the cache directly"
     );
-    println!(
-        "alice's revoked capability blocked by issuer gate: {}",
-        read_after_revoke.is_none()
-    );
+    println!("alice's revoked capability blocked by the cache directly: {was_denied}");
 
     println!("multi-tenant isolation demo complete.");
 }

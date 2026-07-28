@@ -10,7 +10,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use tpt_archon_bridge::capability::{Capability, Resource, Right};
+use tpt_archon_bridge::capability::{Capability, Resource, Right, SharedIssuer};
 
 /// A capability-bearing message addressed to a channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,16 +34,20 @@ pub enum IpcError {
 ///
 /// Each channel has an inbox; [`send`](Self::send) enqueues a message iff the
 /// sender presents a capability authorizing a write to that channel.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MessageRouter {
     inboxes: BTreeMap<u64, Vec<Message>>,
+    issuer: SharedIssuer,
 }
 
 impl MessageRouter {
-    /// Creates an empty router.
-    pub fn new() -> Self {
+    /// Creates an empty router gated by `issuer` — capabilities presented to
+    /// `send`/`receive` are checked for live revocation against it, not just
+    /// their structural (resource, right) shape.
+    pub fn new(issuer: SharedIssuer) -> Self {
         Self {
             inboxes: BTreeMap::new(),
+            issuer,
         }
     }
 
@@ -54,7 +58,11 @@ impl MessageRouter {
 
     /// Sends `message` if `cap` authorizes writing `message.channel`.
     pub fn send(&mut self, cap: &Capability, message: Message) -> Result<(), IpcError> {
-        if !cap.authorizes(Resource::Channel(message.channel), Right::Write) {
+        if !self
+            .issuer
+            .borrow()
+            .authorizes(cap, Resource::Channel(message.channel), Right::Write)
+        {
             return Err(IpcError::Denied);
         }
         let inbox = self
@@ -68,7 +76,11 @@ impl MessageRouter {
     /// Receives (drains) all messages for `channel` if `cap` authorizes reading
     /// it.
     pub fn receive(&mut self, cap: &Capability, channel: u64) -> Result<Vec<Message>, IpcError> {
-        if !cap.authorizes(Resource::Channel(channel), Right::Read) {
+        if !self
+            .issuer
+            .borrow()
+            .authorizes(cap, Resource::Channel(channel), Right::Read)
+        {
             return Err(IpcError::Denied);
         }
         let inbox = self
@@ -82,16 +94,22 @@ impl MessageRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::rc::Rc;
+    use core::cell::RefCell;
     use tpt_archon_bridge::capability::CapabilityIssuer;
+
+    fn shared_issuer() -> Rc<RefCell<CapabilityIssuer>> {
+        Rc::new(RefCell::new(CapabilityIssuer::new()))
+    }
 
     #[test]
     fn authorized_send_and_receive() {
-        let mut issuer = CapabilityIssuer::new();
-        let mut router = MessageRouter::new();
+        let issuer = shared_issuer();
+        let mut router = MessageRouter::new(issuer.clone());
         router.register_channel(7);
 
-        let send_cap = issuer.mint(Resource::Channel(7), Right::Write);
-        let recv_cap = issuer.mint(Resource::Channel(7), Right::Read);
+        let send_cap = issuer.borrow_mut().mint(Resource::Channel(7), Right::Write);
+        let recv_cap = issuer.borrow_mut().mint(Resource::Channel(7), Right::Read);
 
         router
             .send(
@@ -112,10 +130,10 @@ mod tests {
 
     #[test]
     fn send_without_write_capability_is_denied() {
-        let mut issuer = CapabilityIssuer::new();
-        let mut router = MessageRouter::new();
+        let issuer = shared_issuer();
+        let mut router = MessageRouter::new(issuer.clone());
         router.register_channel(1);
-        let read_only = issuer.mint(Resource::Channel(1), Right::Read);
+        let read_only = issuer.borrow_mut().mint(Resource::Channel(1), Right::Read);
         assert_eq!(
             router.send(
                 &read_only,
@@ -130,9 +148,11 @@ mod tests {
 
     #[test]
     fn unknown_channel_errors() {
-        let mut issuer = CapabilityIssuer::new();
-        let mut router = MessageRouter::new();
-        let cap = issuer.mint(Resource::Channel(99), Right::Write);
+        let issuer = shared_issuer();
+        let mut router = MessageRouter::new(issuer.clone());
+        let cap = issuer
+            .borrow_mut()
+            .mint(Resource::Channel(99), Right::Write);
         assert_eq!(
             router.send(
                 &cap,
@@ -143,5 +163,41 @@ mod tests {
             ),
             Err(IpcError::NoSuchChannel)
         );
+    }
+
+    #[test]
+    fn revoked_capability_is_denied_at_send_and_receive() {
+        // Regression test for security-audit finding 1: `revoke` must be
+        // enforced by `MessageRouter` itself, not only by calling
+        // `CapabilityIssuer::validate` out-of-band.
+        let issuer = shared_issuer();
+        let mut router = MessageRouter::new(issuer.clone());
+        router.register_channel(3);
+        let cap = issuer
+            .borrow_mut()
+            .mint(Resource::Channel(3), Right::ReadWrite);
+
+        router
+            .send(
+                &cap,
+                Message {
+                    channel: 3,
+                    payload: alloc::vec![9],
+                },
+            )
+            .unwrap();
+
+        issuer.borrow_mut().revoke(&cap);
+        assert_eq!(
+            router.send(
+                &cap,
+                Message {
+                    channel: 3,
+                    payload: alloc::vec![9]
+                }
+            ),
+            Err(IpcError::Denied)
+        );
+        assert_eq!(router.receive(&cap, 3), Err(IpcError::Denied));
     }
 }

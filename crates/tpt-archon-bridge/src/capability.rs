@@ -13,6 +13,8 @@
 //! in.
 
 use alloc::collections::BTreeSet;
+use alloc::rc::Rc;
+use core::cell::RefCell;
 use core::fmt;
 
 /// The kind of access a [`Capability`] grants.
@@ -135,7 +137,30 @@ impl CapabilityIssuer {
     pub fn validate(&self, cap: &Capability) -> bool {
         self.live.contains(&cap.serial)
     }
+
+    /// Whether `cap` is both live (per [`validate`](Self::validate)) *and*
+    /// structurally authorizes `right` on `resource` (per
+    /// [`Capability::authorizes`]).
+    ///
+    /// This is the check every real enforcement point (the page cache, the
+    /// zero-copy grant layer, the IPC router, unified memory) must use
+    /// instead of calling `authorizes` alone — `authorizes` is a pure
+    /// structural check that has no way to see a revocation, so calling it in
+    /// isolation means `revoke` has no effect at the enforcement boundary.
+    pub fn authorizes(&self, cap: &Capability, resource: Resource, right: Right) -> bool {
+        self.validate(cap) && cap.authorizes(resource, right)
+    }
 }
+
+/// A [`CapabilityIssuer`] shared between a minter and the enforcement points
+/// (page cache, IPC router, ...) that must see live revocations.
+///
+/// `tpt-archon-bridge`/`tpt-archon-kernel` are single-threaded (user-space
+/// first, one `Task` per connection — see crate docs), so `Rc<RefCell<_>>`
+/// matches the concurrency model already used elsewhere in this workspace
+/// (e.g. the scheduler's test harness) rather than introducing `Arc`/`Mutex`
+/// where nothing yet requires cross-thread sharing.
+pub type SharedIssuer = Rc<RefCell<CapabilityIssuer>>;
 
 #[cfg(test)]
 mod tests {
