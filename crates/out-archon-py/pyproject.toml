@@ -1,0 +1,31 @@
+[build-system]
+requires = ["maturin>=1,<2"]
+build-backend = "maturin"
+
+[project]
+name = "archon-db"
+description = "Python bindings for the TPT Archon embeddable SQL / vector-search engine"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "TPT Solutions" }]
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Development Status :: 3 - Alpha",
+    "Topic :: Database",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/tpt-solutions/tpt-archon"
+
+# The importable module is `archon` (see `[lib] name = "archon"` in
+# Cargo.toml and the `#[pymodule] fn archon` in src/lib.rs) even though the
+# PyPI *distribution* name is `archon-db` — "archon" and "sql" bare are both
+# too likely to collide with existing PyPI projects, but the import name
+# doesn't have that constraint, and `import archon` is what reads naturally
+# alongside `archon.Database()`.
+[tool.maturin]
+module-name = "archon"
+manifest-path = "Cargo.toml"

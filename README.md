@@ -97,9 +97,9 @@ docker build -t archon-sql .
 docker run -it archon-sql
 ```
 
-(A `docker-publish.yml` CI workflow can push this image to
-`ghcr.io/<org>/<repo>/archon-sql` — manual-dispatch only, not run
-automatically — so a pre-built image isn't available yet.)
+`docker-publish.yml` also auto-builds and pushes this image to
+`ghcr.io/<org>/<repo>/archon-sql` on every `v*` release tag (and remains
+available via manual dispatch for an ad hoc build in between releases).
 
 **Which crate should I use?**
 
@@ -109,6 +109,7 @@ automatically — so a pre-built image isn't available yet.)
 | Use the storage engine directly | `tpt-archon-core` | [`examples/storage_tour.rs`](crates/tpt-archon-core/examples/storage_tour.rs) |
 | Run SQL interactively | `archon-sql` (package `out-archon-sql`, not published) | `cargo run -p out-archon-sql` |
 | Try it in a browser, no install | `out-archon-wasm` (not published) | [`crates/out-archon-wasm/www/`](crates/out-archon-wasm/www/) — see that crate's README to build/serve it |
+| Use Archon from Python | `archon-db` (package `out-archon-py`, PyO3 bindings, not yet on PyPI) | [`crates/out-archon-py/README.md`](crates/out-archon-py/README.md) |
 | Scaffold a new project | `template/` | `cargo generate --path template` |
 | Formal-verification harness | `out-archon-verify` (not published) | `cargo test -p out-archon-verify` |
 

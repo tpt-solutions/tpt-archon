@@ -1,0 +1,47 @@
+# Empty table: makes this crate its own workspace root rather than letting
+# Cargo's upward directory search attach it to an *enclosing* workspace. The
+# root `Cargo.toml`'s `exclude` entry for this crate handles that when this
+# crate sits directly under the main checkout, but an empty `[workspace]`
+# here is what actually stops the search — recommended by `cargo`'s own error
+# message for an excluded, standalone-buildable crate like this one.
+[workspace]
+
+[package]
+name = "out-archon-py"
+# Hand-written metadata (no `.workspace = true` inheritance) — same reason as
+# `crates/out-archon-verify/Cargo.toml`: this crate is excluded from the root
+# workspace's `members` (see root `Cargo.toml`'s `exclude`), and Cargo only
+# resolves `[workspace.package]` inheritance for actual workspace members.
+# Update these fields by hand if the workspace-wide values in the root
+# `Cargo.toml` change.
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.74"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/tpt-archon"
+homepage = "https://github.com/tpt-solutions/tpt-archon"
+publish = false
+description = "PyO3 Python bindings for the TPT Archon embeddable SQL/vector-search engine"
+
+# Not published to crates.io — this crate is published to PyPI instead (see
+# `pyproject.toml`), which is exactly the case the workspace's `out-archon-`
+# (vs. `tpt-archon-`) naming convention exists to flag (see root CLAUDE.md).
+#
+# Excluded from the root workspace's `members`, not just `publish = false`,
+# for the same practical reason as `out-archon-verify`: a `cdylib`
+# `extension-module` build needs to link against a Python interpreter and is
+# normally driven by `maturin`/`pip`, neither of which is available on a bare
+# `cargo build --workspace` / `cargo test --workspace` CI runner. Leaving it a
+# member would break that offline-clean gate (`.github/workflows/ci.yml`'s
+# `test` job) for everyone who doesn't have Python tooling installed. It gets
+# its own CI job instead (`.github/workflows/python.yml`) that installs
+# `maturin` first.
+
+[lib]
+name = "archon"
+crate-type = ["cdylib"]
+
+[dependencies]
+tpt-archon-relational = { path = "../tpt-archon-relational" }
+pyo3 = { version = "0.22", features = ["extension-module"] }

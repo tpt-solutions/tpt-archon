@@ -32,7 +32,16 @@ members = [
 # type compile fine on the default host target too (they just don't produce
 # anything a browser can use there) — see that crate's README for the actual
 # `wasm32-unknown-unknown` + `wasm-pack` build.
-exclude = ["benches", "crates/out-archon-verify"]
+#
+# `crates/out-archon-py` (PyO3 Python bindings) is excluded for a different
+# but analogous reason to `out-archon-verify`: it's a `cdylib`
+# `extension-module` crate, and building one for real means linking against a
+# Python interpreter, normally driven through `maturin`/`pip` — neither of
+# which is present on a bare `cargo build --workspace` / `cargo test
+# --workspace` runner. Leaving it a member would break the offline-clean gate
+# above for anyone without Python tooling installed. It gets its own CI job
+# instead (`.github/workflows/python.yml`) that installs `maturin` first.
+exclude = ["benches", "crates/out-archon-verify", "crates/out-archon-py"]
 
 [workspace.package]
 version = "0.1.0"
