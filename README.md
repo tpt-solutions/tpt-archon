@@ -108,6 +108,7 @@ automatically — so a pre-built image isn't available yet.)
 | Embed a database in your app | `tpt-archon-relational` | [`examples/select_end_to_end.rs`](crates/tpt-archon-relational/examples/select_end_to_end.rs) |
 | Use the storage engine directly | `tpt-archon-core` | [`examples/storage_tour.rs`](crates/tpt-archon-core/examples/storage_tour.rs) |
 | Run SQL interactively | `archon-sql` (package `out-archon-sql`, not published) | `cargo run -p out-archon-sql` |
+| Try it in a browser, no install | `out-archon-wasm` (not published) | [`crates/out-archon-wasm/www/`](crates/out-archon-wasm/www/) — see that crate's README to build/serve it |
 | Scaffold a new project | `template/` | `cargo generate --path template` |
 | Formal-verification harness | `out-archon-verify` (not published) | `cargo test -p out-archon-verify` |
 

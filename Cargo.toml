@@ -6,6 +6,7 @@ members = [
     "crates/tpt-archon-kernel",
     "crates/tpt-archon-relational",
     "crates/out-archon-sql",
+    "crates/out-archon-wasm",
 ]
 # Benchmarks live in their own crate so Criterion is only built when explicitly
 # running `cargo bench` from `benches/`, keeping the main workspace lean.
@@ -24,6 +25,13 @@ members = [
 # `.github/workflows/ci.yml` (the `verify` job), which has network access.
 # `cargo publish -p tpt-archon-core --dry-run` stays clean because the
 # verifier git deps never enter a shippable crate. See ADR 0003.
+#
+# `crates/out-archon-wasm` (the wasm-bindgen browser playground for
+# `tpt-archon-relational`) stays a normal member, unlike `out-archon-verify`
+# above: it needs no network to build, and `wasm-bindgen`/its `cdylib` crate
+# type compile fine on the default host target too (they just don't produce
+# anything a browser can use there) — see that crate's README for the actual
+# `wasm32-unknown-unknown` + `wasm-pack` build.
 exclude = ["benches", "crates/out-archon-verify"]
 
 [workspace.package]
