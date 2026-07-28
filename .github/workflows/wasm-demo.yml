@@ -1,0 +1,74 @@
+name: WASM demo (GitHub Pages)
+
+# Auto-runs on push to the default branch — unlike release.yml/docker-publish.yml
+# (manual-dispatch only, since publishing a crate/image is a deliberate,
+# per-crate decision), there's no reason to gate *this* on a human: it's a
+# static, read-only demo page with no secrets beyond the built-in Pages
+# deployment token, so every push just republishes it. Also runnable by hand
+# via workflow_dispatch for convenience (e.g. to redeploy without a new
+# commit).
+on:
+  push:
+    # `master` is this repo's actual default branch (`origin/HEAD ->
+    # origin/master`); `ci.yml`'s `branches: [main]` predates that and is
+    # stale — not fixed here since it's out of scope for this change, but
+    # don't copy it into new workflows.
+    branches: [master]
+    paths:
+      - "crates/out-archon-wasm/**"
+      - ".github/workflows/wasm-demo.yml"
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Needed by actions/deploy-pages to publish the build artifact.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; a newer push should win over a
+# still-running older one rather than queue behind it.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build wasm-pack package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build out-archon-wasm for the web target
+        working-directory: crates/out-archon-wasm
+        run: wasm-pack build --target web --out-dir pkg
+      # `www/` (the static page) and `pkg/` (wasm-pack's output) need to sit
+      # side by side, matching the relative import in `www/index.js` — see
+      # crates/out-archon-wasm/README.md for the equivalent local layout.
+      - name: Assemble Pages artifact
+        run: |
+          mkdir -p _site
+          cp -r crates/out-archon-wasm/www/. _site/
+          cp -r crates/out-archon-wasm/pkg _site/pkg
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
