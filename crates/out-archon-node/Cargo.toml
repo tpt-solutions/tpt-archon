@@ -1,0 +1,71 @@
+[package]
+name = "out-archon-node"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+# Higher than the workspace-wide MSRV (1.74, see root Cargo.toml): napi-build
+# 2.x's build script emits the `cargo::` (double-colon) build-script-output
+# syntax, which Cargo only accepts once a crate declares rust-version >=
+# 1.77. This crate is excluded from the root workspace (see below) and never
+# inherits `rust-version.workspace = true`, so raising it here doesn't affect
+# any other crate's MSRV.
+rust-version = "1.77"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/tpt-archon"
+homepage = "https://github.com/tpt-solutions/tpt-archon"
+publish = false
+description = "Node.js (napi-rs) bindings for the tpt-archon-relational embeddable SQL engine"
+
+# Not published to crates.io -- it ships to npm instead (see package.json),
+# hence the `out-archon-` prefix per the workspace's publish/no-publish
+# naming convention, mirroring `out-archon-sql` (a demo/adoption tool, not
+# one of the layered architecture crates).
+#
+# This crate is intentionally NOT a member of the root workspace either (see
+# root Cargo.toml's `exclude`), for the same class of reason `out-archon-verify`
+# is excluded, though the actual constraint is different: building a napi-rs
+# `cdylib` is driven by the `napi` CLI (`crates/out-archon-node/package.json`),
+# which expects to invoke `cargo build` itself with platform-specific target
+# flags and to post-process the resulting `cdylib` into a `.node` file. If this
+# crate stayed a workspace member, a plain `cargo build --workspace` /
+# `cargo test --workspace` from the repo root would try to build the `cdylib`
+# too -- with no `.node` post-processing step and (on some platforms) linker
+# flags napi-build only emits correctly when it believes it's the crate being
+# built directly -- which would either fail outright in an environment without
+# a Node.js install, or silently produce an artifact nothing loads. Keeping it
+# excluded keeps the existing offline-clean `cargo test --workspace` gate
+# (.github/workflows/ci.yml's `test` job) green regardless of whether Node/npm
+# is present; it is built/tested by its own opt-in job in
+# `.github/workflows/node.yml` instead.
+#
+# Because it's excluded, it can't use `field.workspace = true` inheritance
+# above -- Cargo only resolves that for actual workspace members (see
+# `out-archon-verify`'s Cargo.toml for the same note). Update these fields by
+# hand if the workspace-wide values in the root `Cargo.toml` change.
+
+# Empty table: makes this crate its own standalone workspace root instead of
+# relying on the root Cargo.toml's `exclude` entry alone. This is the
+# standard napi-rs convention (its own project template does the same) --
+# napi-rs crates are routinely vendored into arbitrary monorepos for npm
+# packaging, and without this, Cargo's workspace auto-discovery walks *up*
+# past a directory that excludes this crate to look for some other ancestor
+# workspace willing to claim it, which errors ("current package believes
+# it's in a workspace when it's not") the moment one exists a few levels up
+# with no idea this crate should be excluded from it too.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tpt-archon-relational = { path = "../tpt-archon-relational" }
+napi = { version = "2", default-features = false, features = ["napi4", "serde-json"] }
+napi-derive = "2"
+serde_json = "1"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+strip = "symbols"

@@ -1,0 +1,55 @@
+name: Node bindings
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/out-archon-node/**"
+      - "crates/tpt-archon-relational/**"
+      - "crates/tpt-archon-kernel/**"
+      - "crates/tpt-archon-bridge/**"
+      - "crates/tpt-archon-core/**"
+      - ".github/workflows/node.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/out-archon-node/**"
+      - "crates/tpt-archon-relational/**"
+      - "crates/tpt-archon-kernel/**"
+      - "crates/tpt-archon-bridge/**"
+      - "crates/tpt-archon-core/**"
+      - ".github/workflows/node.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: Build + smoke test (${{ matrix.os }})
+    # `out-archon-node` is excluded from the root workspace (see root
+    # Cargo.toml) specifically so a plain `cargo build --workspace` /
+    # `cargo test --workspace` never needs Node.js or the `napi` CLI. This
+    # job is where it actually gets built and exercised instead.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: crates/out-archon-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates/out-archon-node -> target"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install npm dependencies
+        run: npm install
+      - name: Build native module
+        run: npm run build
+      - name: Smoke test
+        run: npm test

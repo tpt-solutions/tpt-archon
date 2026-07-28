@@ -24,7 +24,20 @@ members = [
 # `.github/workflows/ci.yml` (the `verify` job), which has network access.
 # `cargo publish -p tpt-archon-core --dry-run` stays clean because the
 # verifier git deps never enter a shippable crate. See ADR 0003.
-exclude = ["benches", "crates/out-archon-verify"]
+#
+# `out-archon-node` (napi-rs Node.js bindings, publishes to npm not
+# crates.io) is excluded for a related but distinct reason: it builds a
+# `cdylib` that the `napi` CLI (see `crates/out-archon-node/package.json`)
+# expects to drive itself -- invoking `cargo build` with its own
+# platform-target flags and post-processing the resulting library into a
+# loadable `.node` file. Left as a workspace member, a bare
+# `cargo build --workspace` / `cargo test --workspace` would try to build
+# that `cdylib` directly with none of that post-processing, on every
+# contributor's machine regardless of whether Node.js is even installed --
+# breaking the offline-clean adoption story the same way a network-requiring
+# member would. It has its own opt-in job in `.github/workflows/node.yml`
+# (installs Node, runs `napi build`, runs a JS smoke test) instead.
+exclude = ["benches", "crates/out-archon-verify", "crates/out-archon-node"]
 
 [workspace.package]
 version = "0.1.0"

@@ -108,6 +108,7 @@ automatically — so a pre-built image isn't available yet.)
 | Embed a database in your app | `tpt-archon-relational` | [`examples/select_end_to_end.rs`](crates/tpt-archon-relational/examples/select_end_to_end.rs) |
 | Use the storage engine directly | `tpt-archon-core` | [`examples/storage_tour.rs`](crates/tpt-archon-core/examples/storage_tour.rs) |
 | Run SQL interactively | `archon-sql` (package `out-archon-sql`, not published) | `cargo run -p out-archon-sql` |
+| Embed the database from Node.js | `archon-db` (package `out-archon-node`, not published to crates.io -- ships to npm) | [`crates/out-archon-node/README.md`](crates/out-archon-node/README.md) |
 | Scaffold a new project | `template/` | `cargo generate --path template` |
 | Formal-verification harness | `out-archon-verify` (not published) | `cargo test -p out-archon-verify` |
 
