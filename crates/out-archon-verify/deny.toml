@@ -1,0 +1,37 @@
+# cargo-deny configuration for the non-published `out-archon-verify` harness.
+#
+# This crate is excluded from the root workspace (see its Cargo.toml) so it
+# never appears in the root `deny.toml`'s scan, which left its git
+# dependencies on the ecosystem verifiers (tpt-eidos-verifier, tpt-telos-*,
+# tpt-gpu-ir-spec) unscanned by supply-chain CI. This config lets the
+# opt-in `verify` CI job run `cargo deny check` against this crate
+# specifically, allow-listing exactly the git sources it's expected to use.
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+
+[licenses]
+unlicensed = "deny"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/tpt-solutions/tpt-eidos.git",
+    "https://github.com/tpt-solutions/tpt-telos.git",
+    "https://github.com/tpt-solutions/tpt-gpu.git",
+]

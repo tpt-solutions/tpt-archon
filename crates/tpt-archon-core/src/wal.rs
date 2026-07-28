@@ -151,7 +151,15 @@ impl WalRecord {
             .map_err(|_| WalError::Malformed)?
             .to_vec();
         let stored_crc = r.read_u32().map_err(|_| WalError::Malformed)?;
-        let crc_region_end = r.position() - 4;
+        let body_end = r.position();
+        let crc_region_end = body_end - 4;
+        if body_end - body_start != body_len {
+            // The declared body_len disagrees with what the fixed fields plus
+            // payload plus crc actually consumed — trust neither; a caller
+            // that used `body_len` alone to skip to the next record would
+            // desync.
+            return Err(WalError::Malformed);
+        }
         let computed = crc32(&data[body_start..crc_region_end]);
         if computed != stored_crc {
             return Err(WalError::BadChecksum);
@@ -332,6 +340,27 @@ mod tests {
         // Flip a payload byte without fixing the crc.
         buf[HEADER_LEN + 4 + 1] ^= 0x01;
         assert_eq!(WalRecord::decode(&buf), Err(WalError::BadChecksum));
+    }
+
+    #[test]
+    fn mismatched_body_len_is_malformed() {
+        // Regression test: a body_len that disagrees with what the fixed
+        // fields + payload + crc actually consume used to be accepted,
+        // returning a `consumed` count that would desync the next replay
+        // iteration onto a bogus offset.
+        let rec = WalRecord {
+            lsn: 0,
+            kind: RecordKind::PageWrite,
+            block_id: 1,
+            payload: alloc::vec![9, 9, 9],
+        };
+        let mut buf = alloc::vec![0u8; rec.encoded_len()];
+        rec.encode(&mut buf).unwrap();
+        // Corrupt the declared body_len (first 4 bytes) without touching
+        // anything else, so the crc itself would still check out if the
+        // mismatch weren't caught first.
+        buf[0..4].copy_from_slice(&999u32.to_le_bytes());
+        assert_eq!(WalRecord::decode(&buf), Err(WalError::Malformed));
     }
 
     #[test]

@@ -90,6 +90,17 @@ Or run a single statement non-interactively:
 cargo run -p out-archon-sql -e "SELECT 1 + 2;"
 ```
 
+No local Rust toolchain? Build and run the REPL in Docker instead:
+
+```sh
+docker build -t archon-sql .
+docker run -it archon-sql
+```
+
+(A `docker-publish.yml` CI workflow can push this image to
+`ghcr.io/<org>/<repo>/archon-sql` — manual-dispatch only, not run
+automatically — so a pre-built image isn't available yet.)
+
 **Which crate should I use?**
 
 | What you want | Crate | Example |

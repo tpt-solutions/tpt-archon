@@ -1527,7 +1527,11 @@ impl Database {
         ob: &OrderByCosine,
         params: &[Vec<f32>],
     ) -> Result<executor::ResultSet, DbError> {
-        let query = params.get(ob.param - 1).ok_or(DbError::MissingParam)?;
+        let query = ob
+            .param
+            .checked_sub(1)
+            .and_then(|i| params.get(i))
+            .ok_or(DbError::MissingParam)?;
 
         // For subqueries, resolve to an in-memory table first.
         if let TableRef::Subquery { .. } = &stmt.table {

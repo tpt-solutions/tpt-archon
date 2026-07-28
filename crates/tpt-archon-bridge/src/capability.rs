@@ -13,6 +13,7 @@
 //! in.
 
 use alloc::collections::BTreeSet;
+use core::fmt;
 
 /// The kind of access a [`Capability`] grants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -50,11 +51,23 @@ pub enum Resource {
 ///
 /// The inner serial is private, so a `Capability` can only be obtained from a
 /// [`CapabilityIssuer`] — it cannot be fabricated from arbitrary data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Capability {
     serial: u64,
     resource: Resource,
     right: Right,
+}
+
+impl fmt::Debug for Capability {
+    // Redacts `serial` — it's an internal revocation handle, not something
+    // that should end up in logs near a trust boundary.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Capability")
+            .field("resource", &self.resource)
+            .field("right", &self.right)
+            .field("serial", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Capability {
@@ -101,7 +114,10 @@ impl CapabilityIssuer {
     /// Mints a new capability granting `right` over `resource`.
     pub fn mint(&mut self, resource: Resource, right: Right) -> Capability {
         let serial = self.next_serial;
-        self.next_serial += 1;
+        self.next_serial = self
+            .next_serial
+            .checked_add(1)
+            .expect("capability serial space exhausted");
         self.live.insert(serial);
         Capability {
             serial,

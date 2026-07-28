@@ -52,6 +52,14 @@ jobs:
       - name: Test verification harness
         run: cargo test -p out-archon-verify
         working-directory: crates/out-archon-verify
+      - name: Supply-chain audit (verify harness's git deps)
+        # The root `deny` job never sees this crate — it's excluded from the
+        # default workspace, so its git deps on the ecosystem verifiers were
+        # otherwise unscanned. Runs here since resolving them needs network.
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: crates/out-archon-verify/Cargo.toml
+          config: crates/out-archon-verify/deny.toml
 
   deny:
     name: Supply-chain audit (cargo-deny)

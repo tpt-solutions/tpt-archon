@@ -29,6 +29,13 @@ struct Version {
 }
 
 /// The multi-version store.
+///
+/// `commit`'s validate-then-write sequence is only atomic because it runs
+/// inside a single `&mut self` call — this type has no internal locking of
+/// its own. Callers must serialize access externally (e.g. a single-threaded
+/// executor or an external mutex); sharing an `MvccStore` across real
+/// concurrent threads without an external lock reintroduces a TOCTOU window
+/// between validation and version install.
 #[derive(Debug, Default)]
 pub struct MvccStore {
     /// key -> versions ordered by commit timestamp (ascending).

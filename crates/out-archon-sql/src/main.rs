@@ -3,6 +3,8 @@
 //! Usage:
 //!   archon-sql              # interactive mode
 //!   archon-sql -e "SQL;"    # execute a single statement and exit
+//!   archon-sql --help       # show usage
+//!   archon-sql --version    # show version
 //!
 //! Type `.help` for available commands, `.quit` to exit.
 
@@ -12,12 +14,41 @@ use tpt_archon_relational::database::{Database, DbError};
 use tpt_archon_relational::executor::Value;
 use tpt_archon_relational::parser::parse_statement;
 
+/// Result-set rendering format, toggled via `.mode`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputMode {
+    Table,
+    Csv,
+    Json,
+}
+
+fn print_usage() {
+    println!("archon-sql {}", env!("CARGO_PKG_VERSION"));
+    println!("Interactive SQL shell for the TPT Archon database engine.");
+    println!();
+    println!("Usage:");
+    println!("  archon-sql              Start the interactive REPL");
+    println!("  archon-sql -e \"SQL;\"    Execute a single statement and exit");
+    println!("  archon-sql --help       Show this help");
+    println!("  archon-sql --version    Show the version");
+    println!();
+    println!("Once in the REPL, type .help for dot-commands, .quit to exit.");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_usage();
+        return;
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("archon-sql {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if args.len() > 2 && args[1] == "-e" {
         let sql = &args[2];
         let mut db = Database::empty();
-        run_one(&mut db, sql);
+        run_one(&mut db, sql, OutputMode::Table);
         return;
     }
 
@@ -25,6 +56,7 @@ fn main() {
     println!("Type .help for commands, .quit to exit, or enter SQL terminated by ';'.\n");
 
     let mut db = Database::empty();
+    let mut mode = OutputMode::Table;
     let stdin = io::stdin();
     let mut reader = stdin.lock();
 
@@ -44,7 +76,7 @@ fn main() {
         }
 
         if trimmed.starts_with('.') {
-            handle_dot_command(&mut db, trimmed);
+            handle_dot_command(&mut db, &mut mode, trimmed);
             continue;
         }
 
@@ -60,11 +92,11 @@ fn main() {
             sql.push_str(&continuation);
         }
 
-        run_one(&mut db, &sql);
+        run_one(&mut db, &sql, mode);
     }
 }
 
-fn run_one(db: &mut Database, sql: &str) {
+fn run_one(db: &mut Database, sql: &str, mode: OutputMode) {
     let sql = sql.trim().trim_end_matches(';').trim();
     if sql.is_empty() {
         return;
@@ -77,7 +109,7 @@ fn run_one(db: &mut Database, sql: &str) {
                 Ok(rs) => {
                     let elapsed = start.elapsed();
                     if !rs.columns.is_empty() {
-                        print_result_set(&rs.columns, &rs.rows);
+                        print_result_set(&rs.columns, &rs.rows, mode);
                     } else {
                         println!("OK");
                     }
@@ -94,7 +126,60 @@ fn run_one(db: &mut Database, sql: &str) {
     }
 }
 
-fn print_result_set(columns: &[String], rows: &[Vec<Value>]) {
+fn print_result_set(columns: &[String], rows: &[Vec<Value>], mode: OutputMode) {
+    match mode {
+        OutputMode::Table => print_result_set_table(columns, rows),
+        OutputMode::Csv => print_result_set_csv(columns, rows),
+        OutputMode::Json => print_result_set_json(columns, rows),
+    }
+}
+
+fn print_result_set_csv(columns: &[String], rows: &[Vec<Value>]) {
+    let escape_csv = |s: String| {
+        if s.contains(['"', ',', '\n']) {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s
+        }
+    };
+    println!(
+        "{}",
+        columns
+            .iter()
+            .map(|c| escape_csv(c.clone()))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    for row in rows {
+        let cells: Vec<String> = row.iter().map(|v| escape_csv(display_value(v))).collect();
+        println!("{}", cells.join(","));
+    }
+}
+
+fn print_result_set_json(columns: &[String], rows: &[Vec<Value>]) {
+    let escape_json = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let objects: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let fields: Vec<String> = columns
+                .iter()
+                .zip(row.iter())
+                .map(|(col, val)| {
+                    let value_str = match val {
+                        Value::Int(n) => n.to_string(),
+                        Value::Null => "null".to_string(),
+                        other => format!("\"{}\"", escape_json(&display_value(other))),
+                    };
+                    format!("\"{}\":{}", escape_json(col), value_str)
+                })
+                .collect();
+            format!("{{{}}}", fields.join(","))
+        })
+        .collect();
+    println!("[{}]", objects.join(","));
+}
+
+fn print_result_set_table(columns: &[String], rows: &[Vec<Value>]) {
     if rows.is_empty() {
         println!("(0 rows)");
         return;
@@ -165,7 +250,7 @@ fn fmt_db_error(e: &DbError) -> String {
     }
 }
 
-fn handle_dot_command(db: &mut Database, cmd: &str) {
+fn handle_dot_command(db: &mut Database, mode: &mut OutputMode, cmd: &str) {
     match cmd {
         ".quit" | ".q" | ".exit" => {
             println!("Bye.");
@@ -175,6 +260,7 @@ fn handle_dot_command(db: &mut Database, cmd: &str) {
             println!("Dot commands:");
             println!("  .tables              List all tables");
             println!("  .schema TBL          Show columns for a table");
+            println!("  .mode table|csv|json Set result-set output format (default: table)");
             #[cfg(feature = "sqlite-import")]
             println!("  .import FILE [TABLE] Import a SQLite .sqlite file");
             println!("  .quit                Exit the REPL");
@@ -199,6 +285,19 @@ fn handle_dot_command(db: &mut Database, cmd: &str) {
                     println!("  {t}");
                 }
             }
+        }
+        cmd if cmd.starts_with(".mode ") => {
+            let arg = cmd[6..].trim();
+            *mode = match arg {
+                "table" => OutputMode::Table,
+                "csv" => OutputMode::Csv,
+                "json" => OutputMode::Json,
+                other => {
+                    eprintln!("Unknown mode '{other}'. Use table, csv, or json.");
+                    return;
+                }
+            };
+            println!("mode set to {arg}");
         }
         cmd if cmd.starts_with(".schema ") => {
             let name = cmd[8..].trim();

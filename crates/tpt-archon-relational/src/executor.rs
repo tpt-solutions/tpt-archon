@@ -472,7 +472,7 @@ fn eval_aggregate(
                     _ => None,
                 })
                 .min();
-            Ok(Value::Int(min.unwrap_or(0)))
+            Ok(min.map(Value::Int).unwrap_or(Value::Null))
         }
         AggregateFunc::Max => {
             let max = rows
@@ -482,7 +482,7 @@ fn eval_aggregate(
                     _ => None,
                 })
                 .max();
-            Ok(Value::Int(max.unwrap_or(0)))
+            Ok(max.map(Value::Int).unwrap_or(Value::Null))
         }
     }
 }
@@ -788,6 +788,18 @@ mod tests {
         }
         let r = run("SELECT SUM(x) FROM t", &t);
         assert_eq!(r.rows[0][0], Value::Int(10));
+    }
+
+    #[test]
+    fn aggregate_min_max_over_all_null_group_is_null() {
+        // Regression test: MIN/MAX used to fabricate 0 for a group with no
+        // Int values instead of returning SQL NULL.
+        let mut t = Table::new(alloc::vec!["id".to_string(), "x".to_string()]);
+        t.insert(alloc::vec![Value::Int(0), Value::Null]);
+        t.insert(alloc::vec![Value::Int(1), Value::Null]);
+        let r = run("SELECT MIN(x), MAX(x) FROM t", &t);
+        assert_eq!(r.rows[0][0], Value::Null);
+        assert_eq!(r.rows[0][1], Value::Null);
     }
 
     #[test]
