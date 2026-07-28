@@ -1,0 +1,60 @@
+name: Python bindings
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/out-archon-py/**"
+      - "crates/tpt-archon-relational/**"
+      - "crates/tpt-archon-kernel/**"
+      - "crates/tpt-archon-bridge/**"
+      - "crates/tpt-archon-core/**"
+      - ".github/workflows/python.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/out-archon-py/**"
+      - "crates/tpt-archon-relational/**"
+      - "crates/tpt-archon-kernel/**"
+      - "crates/tpt-archon-bridge/**"
+      - "crates/tpt-archon-core/**"
+      - ".github/workflows/python.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-smoke-test:
+    name: Build wheel (maturin) & smoke test
+    runs-on: ubuntu-latest
+    # `crates/out-archon-py` is excluded from the root workspace (see root
+    # `Cargo.toml`) precisely because it needs this Python toolchain to build
+    # at all — a `cdylib` `extension-module` crate isn't something a bare
+    # `cargo build --workspace` runner can link. This job is where it
+    # actually gets built and exercised.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/out-archon-py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Format (out-archon-py crate)
+        run: cargo fmt -p out-archon-py -- --check
+        working-directory: crates/out-archon-py
+      - name: Install maturin
+        run: pip install "maturin>=1,<2"
+      - name: Build & install the extension module into a venv
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install "maturin>=1,<2"
+          maturin develop --release
+        working-directory: crates/out-archon-py
+      - name: Smoke test
+        run: |
+          . .venv/bin/activate
+          python smoke_test.py
+        working-directory: crates/out-archon-py
