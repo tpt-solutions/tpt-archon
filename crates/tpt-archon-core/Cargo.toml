@@ -16,7 +16,15 @@ description = "no_std, zero-allocation storage engine: block device, page manage
 [features]
 default = ["std"]
 std = []
+# Real OS-level memory-mapped, zero-copy *read* access (`MmapBlockDevice`).
+# Off by default: a new OS-integration surface should be adopted explicitly,
+# not force a new transitive dependency onto every existing `std` consumer.
+# Unlike a Linux-only backend, `memmap2` is genuinely cross-platform (mmap(2)
+# on Unix, CreateFileMappingW on Windows), so this needs no target gating and
+# is exercised on every OS in CI, not just Linux.
+mmap = ["std", "dep:memmap2"]
 
 [dependencies]
+memmap2 = { version = "0.9", optional = true }
 
 [dev-dependencies]

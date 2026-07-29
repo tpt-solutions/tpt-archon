@@ -11,3 +11,6 @@ extern crate alloc;
 pub mod ipc;
 pub mod memory;
 pub mod scheduler;
+
+#[cfg(all(feature = "io-uring-backend", target_os = "linux"))]
+pub mod io_uring_backend;

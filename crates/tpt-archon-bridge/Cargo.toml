@@ -16,6 +16,11 @@ description = "Zero-copy IPC and unified page-cache traits gluing tpt-archon-cor
 [features]
 default = ["std"]
 std = ["tpt-archon-core/std"]
+# Real OS-level memory-mapped, zero-copy *read* access, via
+# `tpt-archon-core`'s `MmapBlockDevice`. Off by default; see that crate's
+# feature comment for the rationale (read-only, cross-platform, no target
+# gating needed).
+mmap = ["std", "tpt-archon-core/mmap"]
 
 [dependencies]
 # Path dep during development; switch to a version requirement before publishing

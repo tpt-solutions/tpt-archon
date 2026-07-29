@@ -103,18 +103,33 @@ and asserts `StorageEngine::recover` always yields a prefix-consistent state.
 
 ### `tpt-archon-bridge`
 - **IS:** capability types (unforgeable, revocable) and the unified page-cache
-  trait that lets the kernel and storage share pages with no copy.
+  trait that lets the kernel and storage share pages with no copy. A second,
+  genuinely OS-`mmap`-backed zero-copy *read* path also exists
+  (`MmapPageSource`/`MmapPageCache`, opt-in `mmap` feature) — real shared
+  virtual memory, not just an in-process reference; deliberately a separate,
+  additive trait rather than a `UnifiedPageCache` impl, so it's read-only at
+  the type level, not just by convention.
 - **NOT (yet):** a production IPC transport. Capability *unforgeability* is
   enforced by Rust privacy today, not by the (deferred) `tpt-eidos` dependent
   types. There is no network/process boundary.
 
 ### `tpt-archon-kernel`
 - **IS:** a user-space, capability-based scheduler + IPC model with a unified
-  page cache that *is* the DB buffer pool.
-- **NOT (yet):** a bare-metal microkernel. No real `io_uring`, no real `mmap`,
-  no hardware device drivers (per the user-space-first risk mitigation in
-  `spec.txt` and AGENTS.md). "Microkernel" here means a user-space process
-  model first.
+  page cache that *is* the DB buffer pool. A real Linux `io_uring` reactor
+  (`io_uring_backend` module, `io-uring-backend` Cargo feature, off by
+  default) plugs completion-based reads/writes into the same cooperative
+  [`Task`]/[`Scheduler`] model as every other task — no separate "awaiting
+  I/O" queue, so the scheduler's deadlock-freedom argument still applies.
+  Real read-only `mmap` zero-copy access is also exposed here
+  (`UnifiedMemory::map_read_zero_copy`, opt-in `mmap` feature, cross-platform
+  — Linux `mmap(2)` and Windows `CreateFileMappingW` via `memmap2`, no target
+  gating needed).
+- **NOT (yet):** a bare-metal microkernel. `io_uring` covers plain
+  read/write; `mmap` covers reads only — writes still go through the
+  existing WAL-ordered `write_block` path (see `TODO.md` Phase 2b for why a
+  writable mmap is deliberately deferred); no hardware device drivers (per
+  the user-space-first risk mitigation in `spec.txt` and AGENTS.md).
+  "Microkernel" here means a user-space process model first.
 
 ### `tpt-archon-relational`
 - **IS:** a PostgreSQL-dialect SQL parser, cost-based planner, vectorized

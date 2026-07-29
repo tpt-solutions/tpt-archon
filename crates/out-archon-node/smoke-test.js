@@ -1,4 +1,4 @@
-// Smoke test for the archon-db native module -- exercises CREATE TABLE,
+// Smoke test for the archon-node native module -- exercises CREATE TABLE,
 // INSERT, SELECT ... WHERE ... ORDER BY, and the vector-search path
 // (ORDER BY cosine(...) LIMIT k). Run after `npm run build`:
 //

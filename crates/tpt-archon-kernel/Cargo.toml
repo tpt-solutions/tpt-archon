@@ -16,7 +16,16 @@ description = "Capability-based microkernel (user-space first): async scheduler,
 [features]
 default = ["std"]
 std = ["tpt-archon-core/std", "tpt-archon-bridge/std"]
+# Real io_uring-backed I/O reactor (Linux only). Requires `std`. Not part of
+# `default` because the `io-uring` dependency only builds on Linux; enable it
+# explicitly (e.g. in a Linux-only CI job) with `--features io-uring-backend`.
+io-uring-backend = ["dep:io-uring", "std"]
+# Real OS-level memory-mapped, zero-copy *read* access, forwarded from
+# `tpt-archon-bridge`. Cross-platform (unlike `io-uring-backend`); see that
+# crate's feature comment.
+mmap = ["tpt-archon-bridge/mmap", "std"]
 
 [dependencies]
 tpt-archon-core = { path = "../tpt-archon-core", version = "0.1.0", default-features = false }
 tpt-archon-bridge = { path = "../tpt-archon-bridge", version = "0.1.0", default-features = false }
+io-uring = { version = "0.7", optional = true }

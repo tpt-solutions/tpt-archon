@@ -13,9 +13,13 @@ Early but functional across all four crates: each phase's core functionality is
 implemented and tested. External verification crates (`tpt-eidos-verifier`,
 `tpt-telos-*`, `tpt-gpu-ir-spec`) are wired in via the non-published
 `crates/out-archon-verify` harness, not the shippable crates. GPU support is
-IR-emission only (no runtime). Nothing here is production-ready; see
-[`TODO.md`](TODO.md) for the live checklist and what is deferred (e.g. GPU
-device execution, real `io_uring`/`mmap` backends, publishing).
+IR-emission only (no runtime). A real Linux `io_uring` backend exists behind
+an opt-in feature (`tpt-archon-kernel`'s `io-uring-backend`), and a real,
+cross-platform, read-only `mmap` zero-copy path exists behind another
+(`mmap`, in `tpt-archon-core`/`-bridge`/`-kernel`) — writable mmap and
+bare-metal driver support are still deferred. Nothing here is
+production-ready; see [`TODO.md`](TODO.md) for the live checklist and what
+remains (e.g. GPU device execution, `mmap` backend, publishing).
 
 | Phase | Crate | Purpose | Status |
 |---|---|---|---|
@@ -110,7 +114,7 @@ available via manual dispatch for an ad hoc build in between releases).
 | Run SQL interactively | `archon-sql` (package `out-archon-sql`, not published) | `cargo run -p out-archon-sql` |
 | Try it in a browser, no install | `out-archon-wasm` (not published) | [`crates/out-archon-wasm/www/`](crates/out-archon-wasm/www/) — see that crate's README to build/serve it |
 | Use Archon from Python | `archon-db` (package `out-archon-py`, PyO3 bindings, not yet on PyPI) | [`crates/out-archon-py/README.md`](crates/out-archon-py/README.md) |
-| Embed the database from Node.js | `archon-db` (package `out-archon-node`, not published to crates.io -- ships to npm) | [`crates/out-archon-node/README.md`](crates/out-archon-node/README.md) |
+| Embed the database from Node.js | `archon-node` (crate `out-archon-node`, not published to crates.io -- ships to npm) | [`crates/out-archon-node/README.md`](crates/out-archon-node/README.md) |
 | Scaffold a new project | `template/` | `cargo generate --path template` |
 | Formal-verification harness | `out-archon-verify` (not published) | `cargo test -p out-archon-verify` |
 

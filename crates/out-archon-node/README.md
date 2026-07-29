@@ -1,7 +1,7 @@
-# archon-db
+# archon-node
 
 Node.js bindings ([napi-rs](https://napi.rs)) for `tpt-archon-relational`'s
-embeddable SQL engine. This is the package name `archon-db`; the crate behind
+embeddable SQL engine. This is the package name `archon-node`; the crate behind
 it is `out-archon-node` (see the naming-convention note in the root
 `CLAUDE.md`: it ships to npm, not crates.io, so it isn't published to
 crates.io and carries the `out-archon-` prefix there).
@@ -19,7 +19,7 @@ for RAG-style nearest-neighbor search.
 
 ## What this is not (yet)
 
-- **Not published to npm.** There is no `npm install archon-db` yet --
+- **Not published to npm.** There is no `npm install archon-node` yet --
   build it from source (below).
 - **No async/Promise API.** `execute()` is synchronous; there's no
   worker-thread offload, so a long-running query blocks the Node event loop.
@@ -46,7 +46,7 @@ npm install
 npm run build     # napi build --platform --release
 ```
 
-This produces a platform-specific `archon-db.<platform>.node` native module
+This produces a platform-specific `archon-node.<platform>.node` native module
 plus generated `index.js` / `index.d.ts` loader files in this directory.
 
 Run the smoke test against the freshly built module:
@@ -58,7 +58,7 @@ npm test          # node smoke-test.js
 ## Usage
 
 ```js
-const { Database } = require("archon-db");
+const { Database } = require("archon-node");
 
 const db = new Database();
 

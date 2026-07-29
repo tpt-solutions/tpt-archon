@@ -123,3 +123,41 @@ jobs:
       - name: Build full stack for WASM
         run: cargo check -p tpt-archon-relational --no-default-features --target wasm32-unknown-unknown
 
+  io-uring:
+    name: io_uring backend (Linux only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (io-uring-backend feature)
+        run: cargo clippy -p tpt-archon-kernel --features io-uring-backend --all-targets -- -D warnings
+      - name: Test io_uring reactor
+        # Needs a real Linux kernel with io_uring enabled — ubuntu-latest
+        # runners support it. Not part of the offline `test` job since it's
+        # not a `default` feature (see the crate's Cargo.toml comment).
+        run: cargo test -p tpt-archon-kernel --features io-uring-backend
+
+  mmap:
+    name: mmap zero-copy read path (cross-platform)
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (mmap feature)
+        run: cargo clippy --workspace --features mmap --all-targets -- -D warnings
+      - name: Test mmap zero-copy read path
+        # Not part of the offline `test` job since `mmap` isn't a `default`
+        # feature — but unlike `io-uring-backend`, `memmap2` is genuinely
+        # cross-platform, so this runs (and is verified) on both Linux and
+        # Windows, not just Linux.
+        run: cargo test --workspace --features mmap
+

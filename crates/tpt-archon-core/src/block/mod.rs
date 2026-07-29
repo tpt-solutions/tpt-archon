@@ -9,6 +9,10 @@
 //! - [`FileBlockDevice`] — a `std::fs::File`-backed device for real
 //!   persistence, gated behind the default `std` feature so the crate stays
 //!   `no_std`-clean without it.
+//! - [`MmapBlockDevice`] — a read-only, real OS-`mmap`-backed device offering
+//!   genuinely zero-copy page access (`page_ref`, no allocation, no copy),
+//!   gated behind the opt-in `mmap` feature. Writes are not supported here —
+//!   see the module docs for why.
 
 use core::fmt;
 
@@ -56,6 +60,9 @@ pub enum StorageError {
     /// The buffer pool is full and every frame is pinned, so no page could be
     /// evicted to make room.
     AllFramesPinned,
+    /// The operation is not supported by this backend (e.g. writing to a
+    /// read-only [`MmapBlockDevice`](crate::block::MmapBlockDevice)).
+    Unsupported,
 }
 
 impl fmt::Display for StorageError {
@@ -78,6 +85,9 @@ impl fmt::Display for StorageError {
             StorageError::SyncFailed => write!(f, "sync to durable storage failed"),
             StorageError::AllFramesPinned => {
                 write!(f, "buffer pool full: all frames are pinned")
+            }
+            StorageError::Unsupported => {
+                write!(f, "operation not supported by this backend")
             }
         }
     }
@@ -121,3 +131,8 @@ pub use memory::InMemoryBlockDevice;
 mod file;
 #[cfg(feature = "std")]
 pub use file::FileBlockDevice;
+
+#[cfg(all(feature = "std", feature = "mmap"))]
+mod mmap;
+#[cfg(all(feature = "std", feature = "mmap"))]
+pub use mmap::MmapBlockDevice;

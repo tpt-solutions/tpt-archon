@@ -1,0 +1,11 @@
+# The `formal-proofs/*.telos` manifests pin a SHA-256 of the source file's
+# exact bytes (see crates/out-archon-verify/src/manifest.rs) to catch a
+# silently-edited proof source drifting from what was actually verified. That
+# check computes the hash of whatever bytes are on disk, so a checkout that
+# rewrites line endings (e.g. Windows with `core.autocrlf=true`, which
+# converts LF -> CRLF on checkout) makes every manifest fail with a spurious
+# "ManifestTampered" mismatch that has nothing to do with real tampering.
+# Force these files to a fixed LF encoding regardless of local `autocrlf`
+# settings so the manifest hash is stable across platforms.
+formal-proofs/*.telos text eol=lf
+formal-proofs/*.telos.proof.json text eol=lf

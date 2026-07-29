@@ -1,5 +1,5 @@
 {
-  "name": "archon-db",
+  "name": "archon-node",
   "version": "0.1.0",
   "description": "Node.js bindings (napi-rs) for the tpt-archon-relational embeddable SQL engine",
   "main": "index.js",
@@ -14,7 +14,7 @@
     "index.d.ts"
   ],
   "napi": {
-    "binaryName": "archon-db",
+    "binaryName": "archon-node",
     "targets": [
       "x86_64-pc-windows-msvc",
       "x86_64-apple-darwin",

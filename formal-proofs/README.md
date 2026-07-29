@@ -19,7 +19,7 @@ assistant. See ADR 0003.
 
 | Source                 | Invariant                                                      | Mirrors                          | Status   |
 | ---------------------- | -------------------------------------------------------------- | -------------------------------- | -------- |
-| `wal.telos` (in harness) | WAL replay restores durable state (`durable' == flushed'`)   | `tpt-archon-core::wal`           | solver-checked |
+| `wal.telos`            | Write-ahead ordering (`applied <= logged` always) + commit-gated replay durability (`applied` only grows via an intact Commit/Checkpoint, never via buffering alone or a crash) | `tpt-archon-core::storage::StorageEngine`/`StorageEngine::recover` | solver-checked |
 | `mvcc.telos` (in harness) | MVCC commit conflict keeps `<= 1` committed txn             | `tpt-archon-relational::mvcc`    | solver-checked |
 | `btree.telos`          | Every leaf keeps `1 <= keys <= NODE_CAPACITY` across insert/split | `tpt-archon-core::btree`   | solver-checked |
 | `scheduler.telos`      | Round-robin progress / no held-resource cycle (deadlock-free) | `tpt-archon-kernel::scheduler`   | solver-checked |
@@ -38,9 +38,13 @@ cargo test -p out-archon-verify
 
 This compiles the `.telos` sources under this directory, extracts verification
 problems (`tpt-telos-parser` → `tpt-telos-ir`), and discharges them with
-`tpt-telos-verifier`. The structural invariants for the B-Link tree and the
-cooperative scheduler are exercised here as solver-checked regression tests
-(see the accuracy note above).
+`tpt-telos-verifier`. The structural invariants for the B-Link tree, the
+cooperative scheduler, and the WAL's write-ahead/commit-gating durability are
+exercised here as solver-checked regression tests (see the accuracy note
+above). Each `.telos` source has a matching `<name>.telos.proof.json` manifest
+recording its SHA-256 (checked by `crates/out-archon-verify/src/manifest.rs`),
+so a silently-edited proof source that no longer matches what was actually
+verified fails CI loudly instead of drifting unnoticed.
 
 To verify a single file with the standalone `tpt-telos` frontend
 (built from `github.com/tpt-solutions/tpt-telos` at the rev pinned in
@@ -49,6 +53,7 @@ To verify a single file with the standalone `tpt-telos` frontend
 ```sh
 telos verify formal-proofs/btree.telos
 telos verify formal-proofs/scheduler.telos
+telos verify formal-proofs/wal.telos
 ```
 
 ## On Coq/Lean artifacts

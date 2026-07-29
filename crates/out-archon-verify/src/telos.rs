@@ -1,4 +1,4 @@
-//! Telos (QF_LRA) formal verification of two archon invariants.
+//! Telos (QF_LRA) formal verification of archon invariants.
 //!
 //! We author `.telos` sources that mirror the contracts of the storage engine
 //! and let [`tpt_telos_verifier::verify`] prove each `ensures` clause follows
@@ -7,14 +7,18 @@
 //! `tpt_telos_verifier::verify` (see `telos-verifier`'s own doc example, which
 //! this file mirrors in shape).
 //!
-//! Two invariants are proven here:
+//! Invariants proven inline in this file (small, illustrative models):
 //!
-//! 1. **WAL replay consistency** — `Wal::replay` restores the durable state so
-//!    that the highest applied LSN equals the highest flushed LSN (the torn
-//!    tail is truncated, never applied). Modeled as `durable' == flushed'`.
-//! 2. **MVCC serializability** — a commit aborts when its write-set intersects
-//!    an already-committed transaction's write-set; proven that under a conflict
-//!    the number of committed transactions stays `<= 1`.
+//! - **MVCC serializability** — a commit aborts when its write-set intersects
+//!   an already-committed transaction's write-set; proven that under a conflict
+//!   the number of committed transactions stays `<= 1`.
+//!
+//! The WAL durability invariant is proven from a checked-in `.telos` artifact
+//! (see the "Structural proofs" section below), the same treatment as the
+//! B-Tree and scheduler proofs — it models the real
+//! `StorageEngine`/`StorageEngine::recover` contract (write-ahead ordering
+//! plus commit-gated replay), not just a one-line "replay restores state"
+//! placeholder.
 
 #![cfg(test)]
 
@@ -46,32 +50,6 @@ fn verify_source(src: &str) -> Vec<String> {
         }
     }
     failed
-}
-
-#[test]
-fn wal_replay_restores_durable_state() {
-    // Mirrors `tpt_archon_core::wal` replay: after replay, the applied LSN
-    // equals the flushed LSN. We model the durable state as a single `durable`
-    // field; `replay` sets `durable' = flushed`.
-    let src = r#"
-        module Wal {
-            invariant Durable { durable >= 0 }
-
-            func replay(w: Wal, flushed: Lsn)
-                requires flushed >= 0
-                ensures w.durable == flushed
-            { mutate state { w.durable = flushed } }
-        }
-    "#;
-
-    let modules = parse(src).expect("telos source parses");
-    let problems = extract(&modules).expect("problems extract");
-    assert_eq!(problems.len(), 1);
-    assert_eq!(problems[0].func_name, "replay");
-
-    let result = verify(&problems[0]);
-    assert!(result.all_passed, "checks: {:?}", result.checks);
-    assert!(result.checks.iter().all(|c| c.passed));
 }
 
 #[test]
@@ -152,4 +130,19 @@ fn scheduler_progress_is_deadlock_free() {
     // zero (progress, no held-resource cycle => no deadlock).
     let failed = verify_source(&load_proof("scheduler.telos"));
     assert!(failed.is_empty(), "scheduler proof failures: {failed:?}");
+}
+
+#[test]
+fn wal_durability_invariant_holds_across_append_buffer_commit_crash() {
+    // Mirrors `tpt_archon_core::storage::StorageEngine`/`StorageEngine::recover`:
+    // (1) a PageWrite's WAL record is always logged strictly before that page
+    // is ever applied to the durable device (`applied <= logged`, the
+    // write-ahead invariant), and (2) during replay a PageWrite is only
+    // `pending` until an intact Commit/Checkpoint record proves it durable —
+    // a crash (or torn tail) with writes still pending drops them without
+    // ever incrementing `applied`. This is the exact fix for the
+    // security-audit finding that a crash between `write_page` and `commit`
+    // must not have its dangling `PageWrite` replayed as if durable.
+    let failed = verify_source(&load_proof("wal.telos"));
+    assert!(failed.is_empty(), "wal proof failures: {failed:?}");
 }

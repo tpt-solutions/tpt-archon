@@ -1,0 +1,5 @@
+{
+  "source": "wal.telos",
+  "sha256": "9332078075737ef5c7e83839ca2fcf0619d698cc0049272c5c77c0139f6cb24d",
+  "proof_ids": ["wal_durability_invariant_holds_across_append_buffer_commit_crash"]
+}

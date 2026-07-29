@@ -65,3 +65,8 @@ fn btree_telos_manifest_matches_source() {
 fn scheduler_telos_manifest_matches_source() {
     verify_manifest("scheduler.telos");
 }
+
+#[test]
+fn wal_telos_manifest_matches_source() {
+    verify_manifest("wal.telos");
+}

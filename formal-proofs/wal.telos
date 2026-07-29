@@ -1,0 +1,89 @@
+// Write-ahead log durability invariants.
+//
+// Modeled for tpt-telos (QF_LRA). `tpt_archon_core::storage::StorageEngine`
+// enforces two properties that together make crash recovery correct:
+//
+//   1. Write-ahead ordering: a page's WAL record is appended (`logged`)
+//      strictly before that page image is ever applied to the durable device
+//      (`applied`) — so `applied <= logged` holds at every step.
+//   2. Commit-gated durability: during replay, a `PageWrite` record is only
+//      "buffered" (`pending`) until an intact `Commit`/`Checkpoint` record is
+//      seen later in the log. Only then does it become `applied`; a crash
+//      (end of log, or a torn/corrupt tail) with writes still `pending` drops
+//      them without ever incrementing `applied` — the exact fix for the
+//      security-audit finding that a crash between `write_page` and `commit`
+//      must not have its dangling `PageWrite` replayed as if durable (see
+//      `StorageEngine::recover`'s doc comment and
+//      `recover_drops_page_write_with_no_following_commit` in
+//      `crates/tpt-archon-core/src/storage.rs`).
+//
+// We prove both: `applied <= logged` is maintained by every operation below,
+// and `applied` only ever grows through `commit_flushes_pending` (by exactly
+// the buffered count) — never through buffering alone, and never through a
+// crash.
+
+@boundary(cpu_bound)
+module Wal {
+    // `logged`: PageWrite records appended to the log so far (write-ahead).
+    // `applied`: page images actually durable on the block device.
+    // `pending`: PageWrite records seen during replay, buffered but not yet
+    // proven durable by a following Commit/Checkpoint.
+    invariant Durability {
+        logged >= 0
+        applied >= 0
+        pending >= 0
+        applied <= logged
+    }
+
+    // Appending a PageWrite record logs it before it is ever applied to
+    // storage: `logged` grows, `applied` is untouched, so the write-ahead
+    // ordering `applied <= logged` is preserved.
+    func append_page_write(w: Durability, block_id: PositiveInt)
+        requires w.applied <= w.logged
+        ensures w.logged == old(w.logged) + 1
+        ensures w.applied == old(w.applied)
+        ensures w.applied <= w.logged
+    {
+        mutate state {
+            w.logged += 1
+        }
+    }
+
+    // Replay encounters a PageWrite record: it is buffered, not yet applied.
+    func buffer_during_replay(w: Durability, block_id: PositiveInt)
+        ensures w.pending == old(w.pending) + 1
+        ensures w.applied == old(w.applied)
+    {
+        mutate state {
+            w.pending += 1
+        }
+    }
+
+    // Replay encounters an intact Commit/Checkpoint record: every currently
+    // buffered PageWrite becomes durable (`applied` grows by exactly the
+    // pending count) and the pending batch resets for whatever follows.
+    func commit_flushes_pending(w: Durability)
+        requires w.applied + w.pending <= w.logged
+        ensures w.applied == old(w.applied) + old(w.pending)
+        ensures w.pending == 0
+        ensures w.applied <= w.logged
+    {
+        mutate state {
+            w.applied += w.pending
+            w.pending = 0
+        }
+    }
+
+    // A crash — end of log with no trailing commit, or a torn/corrupt tail —
+    // drops whatever is still buffered. `pending` resets to zero without
+    // `applied` ever moving: an uncommitted write is never considered
+    // durable, matching a torn tail's treatment exactly.
+    func crash_drops_pending(w: Durability)
+        ensures w.pending == 0
+        ensures w.applied == old(w.applied)
+    {
+        mutate state {
+            w.pending = 0
+        }
+    }
+}

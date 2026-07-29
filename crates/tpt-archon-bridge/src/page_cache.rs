@@ -8,6 +8,11 @@
 //! [`CorePageCache`] adapts `tpt-archon-core`'s buffer pool to this trait,
 //! demonstrating that a page written through the core engine is visible through
 //! the bridge with no intervening copy.
+//!
+//! [`MmapPageSource`]/[`MmapPageCache`] (opt-in `mmap` feature) offer a second,
+//! genuinely OS-`mmap`-backed zero-copy path for reads — real shared virtual
+//! memory, not just an in-process reference. Deliberately a separate,
+//! additive trait rather than a `UnifiedPageCache` impl: see its docs for why.
 
 use tpt_archon_core::block::{BlockDevice, StorageError};
 use tpt_archon_core::page::{BufferPool, Page};
@@ -100,6 +105,79 @@ impl<D: BlockDevice> UnifiedPageCache for CorePageCache<D> {
     }
 }
 
+/// Read-only, zero-copy page access backed by a real OS memory mapping
+/// (requires the `mmap` feature).
+///
+/// Deliberately *not* a sub/supertrait of [`UnifiedPageCache`]: a type that
+/// implements only `MmapPageSource` (e.g. [`MmapPageCache`]) has no write
+/// capability at all — the type system, not a runtime check or convention,
+/// is what prevents a reader-only mmap cache from being used to mutate
+/// storage. A type is free to implement both traits if it legitimately
+/// supports both access modes.
+#[cfg(all(feature = "std", feature = "mmap"))]
+pub trait MmapPageSource {
+    /// Borrows page `block_id` directly out of the OS mapping (no copy), if
+    /// `cap` authorizes read access.
+    ///
+    /// Takes `&self`, not `&mut self`: unlike [`UnifiedPageCache::map_read`]
+    /// (which mutates `BufferPool`'s LRU/pin state), a real mmap read needs
+    /// no exclusive access, so multiple concurrent read borrows are possible
+    /// with ordinary shared references. There is deliberately no paired
+    /// `unmap` — the borrow's lifetime *is* the release.
+    fn map_read_zero_copy(
+        &self,
+        cap: &Capability,
+        block_id: u64,
+    ) -> Result<&[u8; tpt_archon_core::page::PAGE_SIZE], CacheError>;
+}
+
+/// Adapts a `tpt-archon-core` [`MmapBlockDevice`](tpt_archon_core::block::MmapBlockDevice)
+/// to [`MmapPageSource`] (requires the `mmap` feature).
+///
+/// Pages are borrowed straight out of the OS mapping — genuinely zero-copy,
+/// not just "no extra copy inside this process" the way [`CorePageCache`]'s
+/// `BufferPool`-backed pages are.
+#[cfg(all(feature = "std", feature = "mmap"))]
+pub struct MmapPageCache {
+    device: tpt_archon_core::block::MmapBlockDevice,
+    issuer: SharedIssuer,
+}
+
+#[cfg(all(feature = "std", feature = "mmap"))]
+impl MmapPageCache {
+    /// Wraps a memory-mapped block device, gating every access against
+    /// `issuer` so a capability revoked after being minted is rejected here.
+    pub fn new(device: tpt_archon_core::block::MmapBlockDevice, issuer: SharedIssuer) -> Self {
+        Self { device, issuer }
+    }
+
+    /// Re-opens the mapping over `path`, so a reader can observe writes
+    /// committed by a writer since this cache was created (mmap is a
+    /// point-in-time snapshot — see `MmapBlockDevice`'s docs).
+    pub fn refresh<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<(), StorageError> {
+        self.device = tpt_archon_core::block::MmapBlockDevice::open(path)?;
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "std", feature = "mmap"))]
+impl MmapPageSource for MmapPageCache {
+    fn map_read_zero_copy(
+        &self,
+        cap: &Capability,
+        block_id: u64,
+    ) -> Result<&[u8; tpt_archon_core::page::PAGE_SIZE], CacheError> {
+        if !self
+            .issuer
+            .borrow()
+            .authorizes(cap, Resource::Page(block_id), Right::Read)
+        {
+            return Err(CacheError::Denied);
+        }
+        Ok(self.device.page_ref(block_id)?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +244,77 @@ mod tests {
         issuer.borrow_mut().revoke(&rw);
         assert_eq!(c.map_read(&rw, 0).err(), Some(CacheError::Denied));
         assert_eq!(c.map_write(&rw, 0).err(), Some(CacheError::Denied));
+    }
+}
+
+#[cfg(all(test, feature = "std", feature = "mmap"))]
+mod mmap_tests {
+    use super::*;
+    use crate::capability::CapabilityIssuer;
+    use alloc::rc::Rc;
+    use core::cell::RefCell;
+    use tpt_archon_core::block::MmapBlockDevice;
+    use tpt_archon_core::page::PAGE_SIZE;
+    use tpt_archon_core::storage::Database;
+
+    fn temp_db(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "tpt-archon-bridge-mmap-{}-{}.bin",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn mmap_cache(path: &std::path::Path, issuer: SharedIssuer) -> MmapPageCache {
+        MmapPageCache::new(MmapBlockDevice::open(path).unwrap(), issuer)
+    }
+
+    #[test]
+    fn mmap_cache_write_then_read_is_zero_copy_visible() {
+        let path = temp_db("visible");
+        let mut db = Database::create(&path, 4).unwrap();
+        db.put(2, &[0xCCu8; PAGE_SIZE]).unwrap();
+
+        let issuer = Rc::new(RefCell::new(CapabilityIssuer::new()));
+        let ro = issuer.borrow_mut().mint(Resource::Page(2), Right::Read);
+        let c = mmap_cache(&path, issuer);
+
+        assert_eq!(c.map_read_zero_copy(&ro, 2).unwrap()[0], 0xCC);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mmap_cache_access_without_capability_is_denied() {
+        let path = temp_db("denied");
+        let _ = Database::create(&path, 4).unwrap();
+
+        let issuer = Rc::new(RefCell::new(CapabilityIssuer::new()));
+        let read_only = issuer.borrow_mut().mint(Resource::Page(0), Right::Read);
+        let c = mmap_cache(&path, issuer);
+
+        // Wrong page.
+        assert_eq!(
+            c.map_read_zero_copy(&read_only, 1).err(),
+            Some(CacheError::Denied)
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mmap_cache_revoked_capability_is_denied() {
+        let path = temp_db("revoked");
+        let _ = Database::create(&path, 4).unwrap();
+
+        let issuer = Rc::new(RefCell::new(CapabilityIssuer::new()));
+        let ro = issuer.borrow_mut().mint(Resource::Page(0), Right::Read);
+        let c = mmap_cache(&path, issuer.clone());
+
+        c.map_read_zero_copy(&ro, 0).unwrap();
+        issuer.borrow_mut().revoke(&ro);
+        assert_eq!(c.map_read_zero_copy(&ro, 0).err(), Some(CacheError::Denied));
+        let _ = std::fs::remove_file(&path);
     }
 }

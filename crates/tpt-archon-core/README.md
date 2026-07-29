@@ -7,7 +7,10 @@ concurrent access to fixed-size pages on a block device.
 ## Modules
 
 - [`block`](src/block/mod.rs) — the [`BlockDevice`] backend abstraction with
-  `InMemoryBlockDevice` and (behind the `std` feature) `FileBlockDevice`.
+  `InMemoryBlockDevice`, (behind the `std` feature) `FileBlockDevice`, and
+  (behind the opt-in `mmap` feature) `MmapBlockDevice` — real OS-`mmap`-backed,
+  genuinely zero-copy *read* access via `page_ref` (writes unsupported by
+  design; see its module docs).
 - [`zerocopy`](src/zerocopy.rs) — fixed-capacity byte buffers (`FixedBuf`) and
   little-endian, bounds-checked `Cursor`/`Reader` for page/WAL framing with no
   heap allocation and no `serde`.
@@ -37,6 +40,9 @@ concurrent access to fixed-size pages on a block device.
 - `std` (default) — enables the file-backed `FileBlockDevice` (needs
   `std::fs`). Build with `--no-default-features` for a fully `no_std`
   configuration.
+- `mmap` — enables `MmapBlockDevice` (implies `std`). Off by default; uses the
+  cross-platform `memmap2` crate (`mmap(2)` on Unix, `CreateFileMappingW` on
+  Windows), so no target gating is needed.
 
 ## Example
 

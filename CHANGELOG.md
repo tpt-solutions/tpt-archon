@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integration test).
 - `tpt-archon-kernel`: cooperative `scheduler`, capability-bearing `ipc`, and
   `memory` (unified page cache as buffer pool). User-space-first.
+- `tpt-archon-kernel`: real Linux `io_uring` reactor (`io_uring_backend` module,
+  opt-in `io-uring-backend` feature) — `IoReadTask`/`IoWriteTask` plug completion-
+  based I/O into the existing cooperative `Scheduler` unchanged.
+- Real OS-level memory-mapped, zero-copy *read* access (opt-in `mmap` feature,
+  cross-platform via `memmap2`, no target gating needed): `tpt-archon-core`'s
+  `MmapBlockDevice` (`page_ref`, genuinely zero-copy — no allocation, no
+  `BufferPool`), wired through `tpt-archon-bridge`'s new `MmapPageSource` trait
+  + `MmapPageCache` adapter (deliberately not a `UnifiedPageCache` impl, so
+  it's read-only at the type level) and `tpt-archon-kernel`'s
+  `UnifiedMemory::map_read_zero_copy`. Writes are unaffected — they continue
+  through `StorageEngine`'s existing WAL-ordered `write_block` path; see
+  `TODO.md` Phase 2b for why a writable mmap is deliberately deferred.
 - `tpt-archon-relational`: `parser` (PostgreSQL-leaning SELECT subset), `planner`
   (cost-based, vectorization + CPU/GPU dispatch), vectorized `executor`
   (+ `vector_topk` CPU fallback), and snapshot-isolation `mvcc` with conflict
