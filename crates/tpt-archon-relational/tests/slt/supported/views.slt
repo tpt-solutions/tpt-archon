@@ -1,0 +1,40 @@
+# CREATE VIEW / DROP VIEW. See ddl.slt for the corpus format convention.
+
+statement ok
+CREATE TABLE people (pname TEXT, age INT)
+
+statement ok
+INSERT INTO people (pname, age) VALUES ('alice', 30)
+
+statement ok
+INSERT INTO people (pname, age) VALUES ('bob', 15)
+
+statement ok
+INSERT INTO people (pname, age) VALUES ('carol', 45)
+
+statement ok
+CREATE VIEW adults AS SELECT pname, age FROM people WHERE age >= 18
+
+query T
+SELECT pname FROM adults ORDER BY pname
+----
+alice
+carol
+
+# A second CREATE VIEW with the same name is an error. (DbError's Debug
+# format is the bare variant name here, not a sentence — see ddl.slt.)
+statement error ViewAlreadyExists
+CREATE VIEW adults AS SELECT pname FROM people
+
+# A view cannot reference itself.
+statement error RecursiveView
+CREATE VIEW loop_view AS SELECT pname FROM loop_view
+
+statement ok
+DROP VIEW adults
+
+# Once dropped, `adults` is resolved as a plain (nonexistent) table name by
+# `resolve_table_ref_with_ctes` -> `scan_table`, which reports UnknownTable,
+# not a view-specific error.
+statement error UnknownTable
+SELECT pname FROM adults

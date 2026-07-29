@@ -1,0 +1,48 @@
+[package]
+name = "out-archon-pgcompat"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.74"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/tpt-archon"
+homepage = "https://github.com/tpt-solutions/tpt-archon"
+publish = false
+description = "Real-Postgres oracle for tpt-archon-relational's .slt comparison corpus (Phase 8 / Track C, slice 1)"
+
+# This crate is intentionally NOT published, and (see root Cargo.toml's
+# `exclude`) intentionally NOT a member of the root workspace either: its
+# dependency on the sync `postgres` crate pulls in `tokio-postgres`
+# transitively, and a bare `cargo test --workspace` has no running Postgres
+# to talk to anyway (it exits cleanly if `POSTGRES_URL` is unset — see
+# `src/main.rs` — mirroring `benches/benches/vector_compare.rs`'s skip
+# pattern). Keeping it out of the workspace is what lets
+# `cargo publish -p tpt-archon-core --dry-run` stay clean and keeps the
+# offline `cargo test --workspace` gate honest, the same reasoning as
+# `out-archon-verify` (see that crate's own Cargo.toml comment and ADR 0003).
+#
+# Because it's excluded, it can't use `field.workspace = true` inheritance
+# above — Cargo only resolves that for actual workspace members, and this
+# crate is built standalone (`cd crates/out-archon-pgcompat && cargo build`,
+# or `cargo build -p out-archon-pgcompat --manifest-path
+# crates/out-archon-pgcompat/Cargo.toml` from the repo root) precisely
+# because it isn't one. Update these fields by hand if the workspace-wide
+# values in the root `Cargo.toml` change.
+#
+# It does NOT depend on `tpt-archon-relational` at all: it validates the
+# *corpus* (the `.slt` files under
+# `../tpt-archon-relational/tests/slt/`, read at runtime relative to
+# `CARGO_MANIFEST_DIR`, not vendored/copied) against real Postgres, which is
+# an entirely separate concern from running that corpus against Archon
+# (that's `tpt-archon-relational/tests/slt.rs`, a normal workspace
+# integration test with zero new dependencies). See this crate's
+# `src/main.rs` doc comment for why a second small `.slt`-directive parser
+# lives here instead of sharing code with `tests/slt.rs`.
+#
+# `postgres = "0.19"` matches the version already vetted in
+# `benches/Cargo.toml` (used there behind the optional `pgvector-bench`
+# feature) for consistency across the two places this workspace talks to a
+# real Postgres.
+
+[dependencies]
+postgres = "0.19"

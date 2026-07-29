@@ -1,0 +1,45 @@
+# Known grammar gaps versus Postgres (spec facts #3, #4, #7). These are
+# scope gaps in the current hand-written parser, not (necessarily) bugs —
+# Track A of the wider roadmap plan is what closes them. See ddl.slt (in
+# supported/) for the corpus format convention.
+
+statement ok
+CREATE TABLE g1 (v INT)
+
+statement ok
+CREATE TABLE g2 (v INT)
+
+# --- Fact #3: FROM is mandatory; a FROM-less SELECT doesn't parse -------
+#
+# Real Postgres supports `SELECT <expr>` with no FROM (e.g. `SELECT 1`).
+# Archon's `parse_select_inner_impl` unconditionally requires a `FROM`
+# keyword after the column list. Using a bare identifier (rather than the
+# literal `1`) here isolates the FROM-specific failure: `SELECT 1` alone
+# would already fail earlier, in column-list parsing, since `1` is not a
+# valid column-name token in this grammar at all (a related but distinct
+# gap — this engine has no scalar-expression SELECT list, only column
+# names/aggregates).
+statement error expected FROM
+SELECT v
+
+# --- Fact #4: only INNER JOIN exists (as either `JOIN` or `INNER JOIN`) -
+#
+# `JoinType` has a single `Inner` variant, and the parser's join loop only
+# recognizes the bare keyword `join` (matching either spelling by ignoring
+# whether the user also wrote `INNER` first via a separate path — but LEFT/
+# RIGHT/FULL/CROSS are simply unrecognized keywords to this grammar, not
+# rejected joins). Postgres accepts all five join forms.
+statement error trailing tokens
+SELECT v FROM g1 LEFT JOIN g2 ON v = v
+
+statement error trailing tokens
+SELECT v FROM g1 CROSS JOIN g2
+
+# --- Fact #7: single-row INSERT only ------------------------------------
+#
+# `InsertStatement.values` is a single `Vec<Literal>` (one row), and
+# `parse_insert`'s VALUES loop only parses one parenthesized tuple before
+# requiring end-of-statement. Postgres supports
+# `VALUES (...), (...), (...)` for a multi-row insert in one statement.
+statement error trailing tokens
+INSERT INTO g1 (v) VALUES (1), (2)

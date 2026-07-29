@@ -61,6 +61,52 @@ jobs:
           manifest-path: crates/out-archon-verify/Cargo.toml
           config: crates/out-archon-verify/deny.toml
 
+  pg-compat:
+    name: Postgres comparison harness (opt-in, stabilizing)
+    runs-on: ubuntu-latest
+    # New differential-testing harness (Phase 8 / Track C, slice 1): kept
+    # non-blocking for a stabilization window while any harness/formatting
+    # flakes get shaken out, before flipping to required.
+    continue-on-error: true
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: archon
+          POSTGRES_DB: archon_compat
+          # See docker-compose.yml's postgres service comment: `C` locale
+          # avoids spurious `ORDER BY <text>` collation mismatches against
+          # Archon's byte-wise text ordering.
+          POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d archon_compat"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format (pgcompat crate)
+        run: cargo fmt --manifest-path crates/out-archon-pgcompat/Cargo.toml -- --check
+      - name: Run the .slt corpus against real Postgres
+        run: cargo run --manifest-path crates/out-archon-pgcompat/Cargo.toml
+        env:
+          POSTGRES_URL: postgres://postgres:archon@localhost:5432/archon_compat
+      - name: Supply-chain audit (pgcompat crate's postgres/tokio-postgres deps)
+        # The root `deny` job never sees this crate — it's excluded from the
+        # default workspace (see root Cargo.toml), so its `postgres`/
+        # `tokio-postgres` dependency tree was otherwise unscanned. Mirrors
+        # the `verify` job's manifest-scoped pattern above, same reason.
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: crates/out-archon-pgcompat/Cargo.toml
+          config: crates/out-archon-pgcompat/deny.toml
+
   deny:
     name: Supply-chain audit (cargo-deny)
     runs-on: ubuntu-latest

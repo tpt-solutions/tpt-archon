@@ -1,0 +1,50 @@
+# BEGIN / COMMIT / ROLLBACK. See ddl.slt for the corpus format convention.
+
+statement ok
+CREATE TABLE accounts (owner TEXT, balance INT)
+
+statement ok
+INSERT INTO accounts (owner, balance) VALUES ('alice', 100)
+
+# A committed transaction's writes are visible afterward.
+statement ok
+BEGIN
+
+statement ok
+UPDATE accounts SET balance = 150 WHERE owner = 'alice'
+
+statement ok
+COMMIT
+
+query I
+SELECT balance FROM accounts WHERE owner = 'alice'
+----
+150
+
+# A rolled-back transaction's writes are discarded.
+statement ok
+BEGIN
+
+statement ok
+UPDATE accounts SET balance = 999 WHERE owner = 'alice'
+
+statement ok
+ROLLBACK
+
+query I
+SELECT balance FROM accounts WHERE owner = 'alice'
+----
+150
+
+# NOTE: this file deliberately does NOT include a "nested BEGIN is an
+# error" case. Archon's `Database::execute` does hard-error on a second
+# `BEGIN` before the first is closed (`DbError::TransactionError`), but real
+# Postgres does NOT — issuing `BEGIN` again inside an already-open
+# transaction just emits a WARNING/NOTICE ("there is already a transaction
+# in progress") and keeps running in the same transaction; it is not an
+# error there. That mismatch was checked directly against PostgreSQL's own
+# documented behavior for `BEGIN`, so this specific case belongs in
+# divergent/, not here — it would fail if the real-Postgres oracle crate
+# ever exercised it. It is intentionally left uncovered by this slice
+# rather than added as a new divergent case not called for by the Slice 1
+# spec's fact list; flagged here for whoever picks this up next.

@@ -1,0 +1,77 @@
+# Known Archon bugs (not stylistic Postgres differences) — these entries
+# are asserted to *keep* diverging from correct behavior. If one of these
+# is ever fixed, its test should move to supported/ rather than being
+# silently updated in place, so the fix is visible in the diff. See
+# ddl.slt (in supported/) for the corpus format convention, including the
+# note on `DbError`'s Debug format for `statement error` patterns.
+#
+# This file is the one deliberate exception to the corpus-wide rule of
+# never using `SELECT *` in `query` blocks (see ddl.slt) — the first test
+# below exists specifically to demonstrate the artifact that rule sidesteps
+# everywhere else.
+#
+# Per Slice-1 spec fact #1 and #2, these are real bugs in the engine, not
+# gaps — do not attempt them against real Postgres (the out-archon-pgcompat
+# oracle crate skips divergent/ entirely; see its own doc comment).
+
+# --- Fact #1: implicit "id" row-id column silently collides with a
+# user-declared column also named "id" ---------------------------------
+#
+# `database.rs`'s `run_create_table` always prepends a hidden row-id column
+# literally named "id" as column 0, *even if* the user's own CREATE TABLE
+# also declares a column named "id" — producing THREE columns
+# [id(auto), id(user), v], not two. `INSERT INTO t1 (id, v) VALUES (1, 10)`
+# resolves the "id" in the column list to the FIRST column named "id"
+# (`Schema::index_of` does `position(|c| c == name)`, i.e. first match) —
+# which is the *auto* column, not the user's. The user's own "id" column is
+# left at its zero-initialized default. This silently loses the value the
+# user thought they were inserting into their own "id" column.
+statement ok
+CREATE TABLE t1 (id INT, v INT)
+
+statement ok
+INSERT INTO t1 (id, v) VALUES (1, 10)
+
+# Expect 3 columns (auto id, user's id, v), values (1, 0, 10): the auto
+# column absorbed the inserted "1", the user's own "id" column silently
+# got the zero-initialized default instead.
+query III
+SELECT * FROM t1
+----
+1 0 10
+
+# --- Fact #6: SQL-standard doubled-quote escaping ('It''s') is broken ---
+#
+# The lexer's string-literal scanner (`Lexer`, the `b'\''` arm) scans to
+# the FIRST `'` unconditionally — it has no lookahead for a doubled `''`
+# meaning "a literal quote inside the string". `'It''s'` therefore lexes as
+# the text literal "It" followed by trailing garbage (`s')`), which fails
+# to parse. This is a live parser bug, not a missing feature: any text
+# value containing an apostrophe cannot be expressed as a literal at all
+# today.
+statement ok
+CREATE TABLE t2 (note TEXT)
+
+statement error expected ',' or ')'
+INSERT INTO t2 (note) VALUES ('It''s')
+
+# --- Fact #2: qualified JOIN ON columns are broken ---------------------
+#
+# The parser accepts `JOIN ... ON t1.id = t2.t1_ref` fine (its `expect_ident`
+# helper generically merges `ident.ident` into a single "t1.id"-shaped
+# string) — but `run_select_scoped`'s join execution looks up that literal
+# qualified string directly against the left/right table's OWN unqualified
+# column list (what `scan_table` returns), which never contains a column
+# named "t1.id" — only "id". So any qualified ON column fails at execution
+# time with `UnknownColumn`, even though real Postgres supports qualified
+# join conditions without issue. Only unqualified ON columns work at all
+# (see supported/joins.slt), which is why this is filed as a real gap, not
+# a "divergent but intentional" case.
+statement ok
+CREATE TABLE t3 (v INT)
+
+statement ok
+CREATE TABLE t4 (t3_ref INT)
+
+statement error UnknownColumn
+SELECT v FROM t3 JOIN t4 ON t3.id = t4.t3_ref

@@ -222,7 +222,7 @@ CI automation, differentiation ideas). Ordered de-risk-first.
 - [x] `GROUP BY` + aggregates (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`).
 - [x] General `ORDER BY` on arbitrary columns (today only the special-cased `ORDER BY cosine(...)` path exists).
 - [x] Expose SQL-level transactions (`BEGIN`/`COMMIT`/`ROLLBACK`) over the MVCC engine that already exists in `mvcc.rs` but isn't reachable from parsed SQL.
-- [ ] Reconcile `spec.txt`'s "PostgreSQL-compatible SQL dialect" / "drop-in replacement" language with actual grammar coverage, or scope the claim down until the above land — avoid repeating the marketing-ahead-of-reality pattern already flagged for zero-CVE claims in ADR 0003.
+- [x] Reconcile `spec.txt`'s "PostgreSQL-compatible SQL dialect" / "drop-in replacement" language with actual grammar coverage, or scope the claim down until the above land — avoid repeating the marketing-ahead-of-reality pattern already flagged for zero-CVE claims in ADR 0003. (Tracked concretely in Phase 8 below rather than reconciled by wording alone: the claim is still false today — one join type, three column types, no set ops/window functions/recursive CTEs, and no wire protocol at all — but there is now a real roadmap plus a Postgres-comparison test harness (Phase 8 Track C, landed) instead of an unqualified claim or a silent scope-down.)
 
 ### Phase 6 — Full SQL compatibility (subqueries, CTEs, views, ALTER TABLE)
 - [x] Foundation: generalized `Expr` (`Literal`-based comparisons instead of hardcoded `i64`, real `IsNull`/`IsNotNull` semantics, `NOT` support), a `TableRef` enum replacing bare table-name strings, a DB-aware expression-evaluation calling convention, and a nested-scan `PlanNode` variant — the shared primitive views/subqueries/CTEs all build on.
@@ -231,7 +231,7 @@ CI automation, differentiation ideas). Ordered de-risk-first.
 - [x] Subqueries in `FROM` (derived tables) and scalar/`IN`/`EXISTS` subqueries in `WHERE`.
 - [x] `WITH` (CTEs), non-recursive first; `WITH RECURSIVE` tracked separately as follow-up, not silently dropped.
 - [x] `ALTER TABLE ADD COLUMN` / `DROP COLUMN` / `RENAME COLUMN` (parallel track — storage-format/row-codec migration work, no query-engine dependency).
-- [ ] Reconcile `spec.txt` wording once all boxes above are checked (this time for real, not by softening the claim).
+- [x] Reconcile `spec.txt` wording once all boxes above are checked (this time for real, not by softening the claim). (Same disposition as the §5.2 item above: tracked as a concrete roadmap in Phase 8 rather than resolved by wording — the dialect gap is real and substantial, see Phase 8 Track A.)
 
 ### Phase 6 follow-ups (known limitations from the `WHERE`-subquery work)
 - [x] Cache uncorrelated subquery results: `Database::eval_where` re-runs an `Exists`/`InSubquery`/`ScalarCmp` subquery once per outer row today, even when it never references the outer row at all — no correlation analysis exists yet to detect and cache that case.
@@ -314,3 +314,123 @@ Three real bugs from an ad hoc security audit (not previously tracked here).
   100`, checked in `parse_expr`, `parse_not`, and `parse_select_inner`),
   returning a normal `ParseError` once exceeded instead of recursing further.
 - [x] One-way SQLite `.sqlite` file importer into `Database`/`run_insert` (`crates/tpt-archon-relational/src/database.rs:246-248`) as a low-effort migration bridge — `spec.txt` already flags SQLite compatibility as a deferred phase.
+
+---
+
+## Phase 8 — PostgreSQL compatibility: dialect, wire protocol, verification (2026-07-29)
+
+`spec.txt` claims a "PostgreSQL-compatible SQL dialect" and a "drop-in
+replacement for most PostgreSQL workloads." An audit confirmed both are
+currently false: the dialect is a narrow subset (one join type, three
+column types, no set operations, no window functions, no recursive CTEs),
+there is no PostgreSQL wire protocol at all (so no real `psql`/libpq client
+could connect even if the dialect were complete), and there is zero
+validation anywhere in the repo against real PostgreSQL semantics (the only
+place Postgres appears is a performance benchmark, not a correctness test).
+This phase tracks closing the gap for real, in three coordinated tracks,
+rather than softening the claim. Order matters within Track A; Tracks A/B/C
+can otherwise proceed in parallel once their own prerequisites land.
+
+### Track A — SQL dialect expansion (`tpt-archon-relational`)
+- [ ] **A0** Tokenizer rewrite: replace the single-token lossy `push_back`
+  (`parser.rs:709-734`) with a real pre-tokenized stream supporting
+  multi-token lookahead and backtracking. Every phase below needs 2-3 token
+  lookahead (`LEFT [OUTER] JOIN`, `UNION [ALL]`, `WITH RECURSIVE`,
+  `NUMERIC(p,s)`) that `push_back` structurally cannot give; it is also
+  already the source of a live bug (`ALTER TABLE t ADD COLUMN v VECTOR`
+  with no `[N]` rewinds over an unread token).
+- [ ] **A1** General scalar `Expr` tree + `eval_scalar` + three-valued logic
+  (Kleene `NULL` propagation, not NULL-as-false). Prerequisite for joins,
+  set-ops, recursive CTEs, and window functions alike. Also fixes two live
+  bugs found during the audit: a `HAVING COUNT(col)` alias mismatch with
+  the SELECT-list alias (`parser.rs:1343` vs `executor.rs:350-363`), and
+  `ORDER BY` on a column not in the SELECT list silently sorting by column
+  0 (`executor.rs:571-574`).
+- [ ] **A2** Type system: `BOOLEAN`, `FLOAT`/`DOUBLE`, `NUMERIC(p,s)`,
+  `DATE`, `TIMESTAMP`, `VARCHAR(n)` — unify the duplicated
+  `parser::ColumnType` / `database::ColumnType` enums first (bridged today
+  by hand-written match arms at `database.rs:448-450`/`502-504`, tolerable
+  at 3 variants, a bug farm at 9).
+- [ ] **A3** Joins: `LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`, multi-condition and
+  arbitrary `ON` expressions. Requires replacing the eager,
+  single-column-equality join hack in `database.rs:1386-1417` with a real
+  `PlanNode::Join` executed through the normal planner/executor path — not
+  patchable in place: there is currently no passing end-to-end join test at
+  all, and qualified-column binding (`t1.col` vs `t2.col`) is already
+  broken.
+- [ ] **A4** `UNION`/`INTERSECT`/`EXCEPT` (with and without `ALL`),
+  including the `Query`-wrapper AST refactor (CTEs/ORDER BY/LIMIT move off
+  `SelectStatement` onto the whole query, matching Postgres scoping).
+- [ ] **A5** `WITH RECURSIVE`, built on A4's set-op AST (a recursive CTE is
+  formally `anchor UNION [ALL] recursive-term`). Also closes a
+  stack-overflow hole where a CTE that self-references through a subquery
+  currently recurses forever (`select_references_table`,
+  `database.rs:1722-1731`, only walks `FROM`/joins today).
+- [ ] **A6** Window functions (`OVER`, `PARTITION BY`, `ORDER BY` within
+  `OVER`, `ROW_NUMBER`/`RANK`/`DENSE_RANK`/`LAG`/`LEAD`/aggregates-as-
+  window-functions), default + `ROWS` frames only; `RANGE`/`GROUPS` with
+  numeric offsets explicitly rejected as `Unsupported` rather than silently
+  wrong.
+
+### Track B — PostgreSQL wire-protocol server (new crate `out-archon-pgwire`)
+New non-published workspace member depending only on
+`tpt-archon-relational` (a leaf, not a layer — nothing in the dependency
+chain builds on it, matching the existing `out-archon-*` convention).
+- [ ] **B0** Additive `Database::execute_with_stats` returning
+  row-count/command-tag info (today `run_insert_stmt`/`run_update`/
+  `run_delete` compute this and discard it) — unblocks correct
+  `CommandComplete` tags.
+- [ ] **B1** Wire codec + startup/SSL-negotiation/auth (trust + cleartext) +
+  simple query protocol (`Q`), over a blocking thread-per-connection
+  `std::net::TcpListener`. No new async runtime: the database
+  lock/MVCC-serialization requirement caps concurrency at a mutex
+  regardless, so `tokio` buys nothing here — document the reasoning as
+  ADR 0004 so it's revisited on evidence (a measured connection-scaling
+  need) rather than on taste.
+- [ ] **B2** SQLSTATE error-code mapping (exhaustive match, no wildcard
+  arm) + session-level transaction state machine (`Idle`/`Open`/`Failed`,
+  matching Postgres's aborted-transaction behavior, which `Database` has no
+  concept of today).
+- [ ] **B3** Compat shims owned by the wire crate, not the parser:
+  statement splitting on `;`, `--`/`/* */` comment stripping,
+  `SET`/`SHOW`/`RESET` swallowing, a narrow `SELECT <const>`-with-no-FROM
+  shim (the most common driver health-check query), transaction-keyword
+  synonyms.
+- [ ] **B4** Extended query protocol (Parse/Bind/Execute/Describe/Sync),
+  zero-parameter statements only for v1 — real typed parameter binding
+  needs a relational-crate parameter API that doesn't exist yet and
+  shouldn't be invented inside the wire crate.
+- [ ] **B5+** Deferred stretch goals, roughly in order: SCRAM-SHA-256 auth;
+  per-session (not per-`Database`) transaction state in
+  `tpt-archon-relational` (unlocks per-statement rather than
+  per-transaction locking, and reachable `40001` serialization failures);
+  re-hosting connections on `kernel::scheduler::Task` to make `spec.txt`'s
+  "one Task per connection" claim literally true; `io_uring` socket
+  opcodes as the real spec-aligned end state; extracting a published
+  `no_std`+`alloc` wire-codec crate once the API stabilizes; minimal
+  `pg_catalog` emulation (needed for a real discoverable `vector` type
+  OID — pgvector's OID isn't a fixed constant, it's discovered per
+  database via `pg_type`); `COPY` protocol; TLS; query cancellation.
+- [ ] Vector-type wire encoding decision (recorded now, revisit at B5+):
+  encode `Value::Vector` as `text` (OID 25) using pgvector's own
+  `[0.1,0.9]` textual form, so `psql` output is byte-identical to a real
+  pgvector server for the same query — which is exactly what Track C's
+  diff checks — at zero catalog-emulation cost.
+
+### Track C — Real-Postgres comparison suite
+- [x] **Slice 1**: `.slt`-format corpus (`crates/tpt-archon-relational/tests/slt/{supported,divergent}/`)
+  + hand-rolled Archon-side test runner (`crates/tpt-archon-relational/tests/slt.rs`,
+  part of `cargo test --workspace`, zero new dependencies) + a real-Postgres
+  oracle mode (new excluded crate `crates/out-archon-pgcompat`, using the
+  `postgres` crate already vetted in `benches/benches/vector_compare.rs`),
+  wired into `docker-compose.yml` (`pgvector/pgvector:pg16`, `--locale=C`)
+  and a non-blocking `pg-compat` CI job. Validates SQL semantics via the
+  existing Rust API — no wire protocol involved yet.
+- [ ] **Slice 2** (after Track B lands B1-B4): point the same corpus at
+  `out-archon-pgwire` through a real `postgres` crate client instead of the
+  Rust API, catching wire-encoding bugs (RowDescription OIDs, DataRow
+  formatting, CommandComplete tags, SQLSTATEs) Slice 1 cannot see.
+- [ ] `docs/POSTGRES_COMPATIBILITY.md`, generated/maintained from the
+  corpus's `divergent/` cases — the artifact that finally lets the §5.2/
+  Phase 6 reconciliation items above close honestly instead of
+  rhetorically.

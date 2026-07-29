@@ -1,0 +1,57 @@
+# INNER JOIN coverage. See ddl.slt for the corpus format convention.
+#
+# Per spec fact #2: qualified ON columns (`ON t1.id = t2.col`) are broken —
+# `run_select_scoped`'s join code looks up the join's `left_col`/`right_col`
+# strings directly against the unqualified column list `scan_table` returns,
+# so a qualified name like `t1.id` never matches. Only unqualified ON
+# columns work. Per fact #1, the implicit `id` column also means an
+# unqualified join column named `id` would silently bind to the *auto*
+# row-id column, not any user-declared `id` column — so this file avoids
+# `id` as a join column name entirely (neither joined table declares a
+# column literally named `id`), sidestepping that landmine rather than
+# tripping over it. Both cases (qualified ON, and the `id`-collision) are
+# covered instead in divergent/known_bugs.slt as known bugs, not attempted
+# against real Postgres.
+
+statement ok
+CREATE TABLE customers (cid INT, cname TEXT)
+
+statement ok
+CREATE TABLE orders (oid INT, cust_id INT, amount INT)
+
+statement ok
+INSERT INTO customers (cid, cname) VALUES (1, 'alice')
+
+statement ok
+INSERT INTO customers (cid, cname) VALUES (2, 'bob')
+
+statement ok
+INSERT INTO orders (oid, cust_id, amount) VALUES (100, 1, 50)
+
+statement ok
+INSERT INTO orders (oid, cust_id, amount) VALUES (101, 1, 75)
+
+statement ok
+INSERT INTO orders (oid, cust_id, amount) VALUES (102, 2, 20)
+
+# Only unqualified ON columns work; the joined (right-hand) table's columns
+# come back renamed with a `<table>.` prefix regardless of collision, so
+# post-join projection/filtering must use the qualified form for the right
+# table's own columns.
+query II
+SELECT oid, amount FROM orders JOIN customers ON cust_id = cid WHERE customers.cname = 'alice'
+----
+100 50
+101 75
+
+query I
+SELECT oid FROM orders JOIN customers ON cust_id = cid WHERE customers.cid = 2
+----
+102
+
+query I
+SELECT amount FROM orders JOIN customers ON cust_id = cid ORDER BY amount DESC
+----
+75
+50
+20

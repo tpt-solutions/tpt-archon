@@ -3,3 +3,27 @@ services:
     build: .
     stdin_open: true
     tty: true
+
+  # Real-Postgres oracle for the Phase 8 / Track C comparison harness (see
+  # `crates/out-archon-pgcompat` and `crates/tpt-archon-relational/tests/`).
+  # `pgvector/pgvector:pg16` is the same image the `vector_compare` benchmark
+  # (`benches/benches/vector_compare.rs`) already validates numbers against,
+  # so both suites share one reference server image.
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-archon}
+      POSTGRES_DB: archon_compat
+      # `C` locale is not cosmetic: `executor::Value`'s text ordering is
+      # byte-wise, while Postgres under a real locale (e.g. en_US.UTF-8)
+      # uses ICU/libc collation where `'a' < 'B'` — without pinning `C`,
+      # every `ORDER BY <text>` comparison in the corpus would fail on a
+      # collation mismatch instead of a real semantic difference.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d archon_compat"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

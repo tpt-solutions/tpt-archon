@@ -1,0 +1,54 @@
+# ALTER TABLE ADD/DROP/RENAME COLUMN. See ddl.slt for the corpus format
+# convention (including the note on `DbError`'s Debug format for
+# `statement error` patterns).
+
+statement ok
+CREATE TABLE contacts (cname TEXT, age INT)
+
+statement ok
+INSERT INTO contacts (cname, age) VALUES ('alice', 30)
+
+statement ok
+ALTER TABLE contacts ADD COLUMN email TEXT
+
+# New column defaults to NULL for pre-existing rows.
+query TIT
+SELECT cname, age, email FROM contacts
+----
+alice 30 NULL
+
+statement ok
+UPDATE contacts SET email = 'alice@example.com' WHERE cname = 'alice'
+
+query T
+SELECT email FROM contacts WHERE cname = 'alice'
+----
+alice@example.com
+
+statement ok
+ALTER TABLE contacts DROP COLUMN age
+
+query T
+SELECT cname FROM contacts
+----
+alice
+
+statement ok
+ALTER TABLE contacts RENAME COLUMN cname TO full_name
+
+query T
+SELECT full_name FROM contacts
+----
+alice
+
+# Dropping a column that doesn't exist is an error (DbError's Debug is the
+# bare variant name here, with just the column identifier, not a sentence).
+statement error UnknownColumn
+ALTER TABLE contacts DROP COLUMN nonexistent
+
+# Adding a column name that already exists is a (differently-worded) error.
+statement error already exists
+ALTER TABLE contacts ADD COLUMN full_name TEXT
+
+statement error UnknownTable
+ALTER TABLE nonexistent_table ADD COLUMN x INT

@@ -1,0 +1,77 @@
+# GROUP BY + aggregates + ORDER BY. See ddl.slt for the corpus format
+# convention. (HAVING is deliberately not covered here — see the note
+# below.)
+#
+# Per spec fact #5, AVG/SUM diverge from Postgres on empty input (Archon
+# returns integer 0, Postgres returns NULL/numeric) and AVG does integer
+# division. Note AVG is deliberately NOT included below even for non-empty,
+# evenly-dividing groups: Postgres's `AVG(int)` always returns `numeric`
+# (not plain integer/bigint), and `numeric`'s own text/JSON representation
+# keeps its computed decimal scale (e.g. `150.0000000000000000`, not `150`)
+# regardless of whether the division happened to come out even — so the
+# *value* can agree while the *wire format* still doesn't, which is exactly
+# what this corpus's byte-level row comparison would catch. That is a
+# real, additional facet of fact #5 beyond the plan's original framing (the
+# plan's "non-empty AVG cases match Postgres" assumption undersells this),
+# so AVG stays entirely in divergent/aggregates.slt instead. SUM/COUNT/MIN/
+# MAX don't have this problem: Postgres's `SUM(int4)`/`COUNT(*)` return
+# `bigint` and `MIN`/`MAX` return the input's own type, but all of those
+# serialize as a bare decimal integer token same as Archon's `Value::Int`,
+# so they're safe here.
+#
+# Aggregates are always given an explicit `AS alias` (matching the engine's
+# own test suite). HAVING is NOT covered in this file at all — see
+# divergent/aggregates.slt for why: Archon's HAVING only accepts the SELECT
+# list's declared alias (confirmed: a raw `HAVING COUNT(*) >= n` errors
+# `UnknownColumn("count")`), while real Postgres requires the opposite (a
+# raw aggregate expression, not an output alias — HAVING is evaluated before
+# SELECT-list aliases exist per standard SQL logical query order). No single
+# HAVING form is accepted by both engines today, so it can't live here.
+
+statement ok
+CREATE TABLE employees (dept TEXT, salary INT)
+
+statement ok
+INSERT INTO employees (dept, salary) VALUES ('eng', 100)
+
+statement ok
+INSERT INTO employees (dept, salary) VALUES ('eng', 200)
+
+statement ok
+INSERT INTO employees (dept, salary) VALUES ('sales', 50)
+
+statement ok
+INSERT INTO employees (dept, salary) VALUES ('sales', 150)
+
+statement ok
+INSERT INTO employees (dept, salary) VALUES ('sales', 100)
+
+query TI
+SELECT dept, COUNT(*) AS cnt FROM employees GROUP BY dept ORDER BY dept
+----
+eng 2
+sales 3
+
+query TI
+SELECT dept, SUM(salary) AS total FROM employees GROUP BY dept ORDER BY dept
+----
+eng 300
+sales 300
+
+query TI
+SELECT dept, MIN(salary) AS lo FROM employees GROUP BY dept ORDER BY dept
+----
+eng 100
+sales 50
+
+query TI
+SELECT dept, MAX(salary) AS hi FROM employees GROUP BY dept ORDER BY dept
+----
+eng 200
+sales 150
+
+# COUNT(*) with no GROUP BY at all, over a non-empty table.
+query I
+SELECT COUNT(*) AS cnt FROM employees
+----
+5

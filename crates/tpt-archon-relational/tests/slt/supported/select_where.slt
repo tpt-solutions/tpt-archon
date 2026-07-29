@@ -1,0 +1,112 @@
+# SELECT / WHERE coverage: AND/OR/NOT, comparison operators, LIKE, IN,
+# BETWEEN, IS [NOT] NULL. See ddl.slt for the corpus format convention.
+
+statement ok
+CREATE TABLE items (name TEXT, category TEXT, qty INT, note TEXT)
+
+statement ok
+INSERT INTO items (name, category, qty, note) VALUES ('apple', 'fruit', 10, 'fresh')
+
+statement ok
+INSERT INTO items (name, category, qty, note) VALUES ('banana', 'fruit', 5, 'ripe')
+
+statement ok
+INSERT INTO items (name, category, qty, note) VALUES ('carrot', 'veg', 0, NULL)
+
+statement ok
+INSERT INTO items (name, category, qty, note) VALUES ('daikon', 'veg', 3, 'crisp')
+
+# Basic comparisons.
+query T
+SELECT name FROM items WHERE qty > 4
+----
+apple
+banana
+
+query T
+SELECT name FROM items WHERE qty >= 5
+----
+apple
+banana
+
+query T
+SELECT name FROM items WHERE qty < 4
+----
+carrot
+daikon
+
+query T
+SELECT name FROM items WHERE qty <= 3
+----
+carrot
+daikon
+
+query T
+SELECT name FROM items WHERE qty != 5
+----
+apple
+carrot
+daikon
+
+# AND / OR / NOT.
+query T
+SELECT name FROM items WHERE category = 'fruit' AND qty > 6
+----
+apple
+
+query T
+SELECT name FROM items WHERE category = 'veg' OR qty > 9
+----
+apple
+carrot
+daikon
+
+query T
+SELECT name FROM items WHERE NOT category = 'fruit'
+----
+carrot
+daikon
+
+# LIKE (% and _ wildcards).
+query T
+SELECT name FROM items WHERE name LIKE 'a%'
+----
+apple
+
+query T
+SELECT name FROM items WHERE note LIKE '%ip%'
+----
+banana
+
+query T
+SELECT name FROM items WHERE name LIKE '_arrot'
+----
+carrot
+
+# IN (int list) — qty is an INT column.
+query T
+SELECT name FROM items WHERE qty IN (0, 3)
+----
+carrot
+daikon
+
+# BETWEEN (int bounds only).
+query T
+SELECT name FROM items WHERE qty BETWEEN 3 AND 10
+----
+apple
+banana
+daikon
+
+# IS NULL / IS NOT NULL.
+query T
+SELECT name FROM items WHERE note IS NULL
+----
+carrot
+
+query T
+SELECT name FROM items WHERE note IS NOT NULL
+----
+apple
+banana
+daikon

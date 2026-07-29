@@ -1,0 +1,94 @@
+# Subqueries (IN / EXISTS / scalar comparison / derived tables in FROM) and
+# non-recursive WITH CTEs. See ddl.slt for the corpus format convention.
+#
+# Patterns here mirror the ones already proven working in database.rs's own
+# test module (`correlated_subquery_sees_outer_row`, `column_to_column_comparison`,
+# `cte_multiple`, `cte_visible_in_where_subquery`, the `(SELECT ...) AS sub`
+# derived-table tests) rather than inventing new shapes, since correlated
+# subquery/CTE column resolution is one of the more delicate paths in this
+# engine.
+
+statement ok
+CREATE TABLE staff (sname TEXT, age INT)
+
+statement ok
+INSERT INTO staff (sname, age) VALUES ('u0', 0)
+
+statement ok
+INSERT INTO staff (sname, age) VALUES ('u1', 10)
+
+statement ok
+INSERT INTO staff (sname, age) VALUES ('u2', 20)
+
+statement ok
+INSERT INTO staff (sname, age) VALUES ('u3', 30)
+
+statement ok
+INSERT INTO staff (sname, age) VALUES ('u4', 40)
+
+# Column-to-column comparison (no subquery involved, but exercised by the
+# same expression evaluator subqueries rely on).
+query T
+SELECT sname FROM staff WHERE age > 15 ORDER BY sname
+----
+u2
+u3
+u4
+
+# Non-recursive WITH CTE, then filtering the CTE's own output.
+query T
+WITH young AS (SELECT sname, age FROM staff WHERE age < 30) SELECT sname FROM young WHERE age >= 10 ORDER BY sname
+----
+u1
+u2
+
+# Non-correlated EXISTS: true for every outer row since the inner query is
+# non-empty regardless of the outer row.
+query T
+SELECT sname FROM staff WHERE EXISTS (SELECT sname FROM staff WHERE age = 10) ORDER BY sname
+----
+u0
+u1
+u2
+u3
+u4
+
+# Correlated EXISTS: keeps rows that have some other row with a smaller age.
+query T
+SELECT sname FROM staff WHERE EXISTS (SELECT sname FROM staff AS inner_s WHERE inner_s.age < staff.age) ORDER BY sname
+----
+u1
+u2
+u3
+u4
+
+# IN (SELECT ...): keeps rows whose age matches any age produced by the
+# subquery (here, just u2's own age).
+query T
+SELECT sname FROM staff WHERE age IN (SELECT age FROM staff WHERE sname = 'u2') ORDER BY sname
+----
+u2
+
+# Scalar subquery comparison: `col > (SELECT ...)`, subquery must return
+# exactly one row/column.
+query T
+SELECT sname FROM staff WHERE age > (SELECT age FROM staff WHERE sname = 'u0') ORDER BY sname
+----
+u1
+u2
+u3
+u4
+
+# Derived table in FROM: `(SELECT ...) AS alias`, with qualified column
+# references (`alias.col`) in the outer WHERE. No ORDER BY here: the ORDER
+# BY parser only accepts a bare (unqualified) column name — it never checks
+# for a following `.field` the way `expect_ident` does elsewhere in this
+# grammar — so `ORDER BY sub.sname` fails to parse ("trailing tokens after
+# statement", confirmed empirically); this file's other ORDER BY tests all
+# order by an unqualified name instead. This corpus relies on the runner's
+# own order-insensitive (sort-both-sides) comparison here instead.
+query T
+SELECT sub.sname FROM (SELECT sname, age FROM staff WHERE age >= 20) AS sub WHERE sub.age < 40
+----
+u2
+u3

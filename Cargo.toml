@@ -54,11 +54,26 @@ members = [
 # breaking the offline-clean adoption story the same way a network-requiring
 # member would. It has its own opt-in job in `.github/workflows/node.yml`
 # (installs Node, runs `napi build`, runs a JS smoke test) instead.
+#
+# `crates/out-archon-pgcompat` is the real-Postgres oracle half of the
+# Postgres-comparison test harness (Phase 8 / Track C, slice 1): it reads
+# the same `.slt` corpus as `tpt-archon-relational/tests/slt.rs` (the
+# Archon-side runner, which IS a normal `cargo test --workspace` integration
+# test) and asserts the corpus's expected rows are what a real PostgreSQL
+# server actually returns. It's excluded for the same shape of reason as
+# `out-archon-verify` above: its dependency on the sync `postgres` crate
+# pulls in `tokio-postgres` transitively, and a bare `cargo test --workspace`
+# has no running Postgres to connect to anyway (it skips cleanly if
+# `POSTGRES_URL` is unset, but there's no reason to build it on every
+# contributor's machine when it can never do anything useful there). It has
+# its own opt-in job in `.github/workflows/ci.yml` (the `pg-compat` job,
+# which spins up a `pgvector/pgvector:pg16` service container).
 exclude = [
     "benches",
     "crates/out-archon-verify",
     "crates/out-archon-py",
     "crates/out-archon-node",
+    "crates/out-archon-pgcompat",
 ]
 
 [workspace.package]

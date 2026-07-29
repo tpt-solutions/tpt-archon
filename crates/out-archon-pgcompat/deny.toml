@@ -1,0 +1,37 @@
+# cargo-deny configuration for the non-published `out-archon-pgcompat`
+# oracle crate.
+#
+# This crate is excluded from the root workspace (see its Cargo.toml), so
+# the root `deny.toml`'s scan never sees it or its `postgres`/
+# `tokio-postgres` dependency tree. This config lets the opt-in `pg-compat`
+# CI job (`.github/workflows/ci.yml`) run `cargo deny check` against this
+# crate specifically, mirroring `crates/out-archon-verify/deny.toml`'s
+# precedent for the analogous reason (see that file's own comment and this
+# crate's Cargo.toml comment / ADR 0003).
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+
+[licenses]
+unlicensed = "deny"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "BSD-3-Clause",
+    "ISC",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
