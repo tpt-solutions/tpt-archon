@@ -24,4 +24,4 @@ sqlite-import = ["dep:rusqlite"]
 
 [dependencies]
 tpt-archon-relational = { path = "../tpt-archon-relational" }
-rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
