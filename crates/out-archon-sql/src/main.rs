@@ -219,6 +219,7 @@ fn print_result_set_table(columns: &[String], rows: &[Vec<Value>]) {
 fn display_value(val: &Value) -> String {
     match val {
         Value::Int(n) => n.to_string(),
+        Value::Float(f) => f.to_string(),
         Value::Text(s) => s.clone(),
         Value::Vector(v) => {
             let inner: Vec<String> = v.iter().map(|f| format!("{:.4}", f)).collect();
@@ -306,7 +307,14 @@ fn handle_dot_command(db: &mut Database, mode: &mut OutputMode, cmd: &str) {
                     for (col, ty) in schema.columns.iter().zip(&schema.types) {
                         let ty_str = match ty {
                             tpt_archon_relational::database::ColumnType::Int => "INT",
+                            tpt_archon_relational::database::ColumnType::Boolean => "BOOLEAN",
+                            tpt_archon_relational::database::ColumnType::Float => "FLOAT",
+                            tpt_archon_relational::database::ColumnType::Double => "DOUBLE",
+                            tpt_archon_relational::database::ColumnType::Numeric => "NUMERIC",
                             tpt_archon_relational::database::ColumnType::Text => "TEXT",
+                            tpt_archon_relational::database::ColumnType::Varchar(_) => "VARCHAR",
+                            tpt_archon_relational::database::ColumnType::Date => "DATE",
+                            tpt_archon_relational::database::ColumnType::Timestamp => "TIMESTAMP",
                             tpt_archon_relational::database::ColumnType::Vector => "VECTOR",
                         };
                         println!("  {col} {ty_str}");

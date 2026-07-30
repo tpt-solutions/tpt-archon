@@ -91,6 +91,7 @@ impl Default for ArchonDb {
 fn value_to_json(v: &Value) -> serde_json::Value {
     match v {
         Value::Int(i) => serde_json::json!(i),
+        Value::Float(f) => serde_json::json!(f),
         Value::Text(s) => serde_json::json!(s),
         Value::Vector(vec) => serde_json::json!(vec),
         Value::Null => serde_json::Value::Null,

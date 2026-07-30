@@ -1,0 +1,103 @@
+//! Column types, the table [`Schema`], and [`DbError`] — the small,
+//! dependency-light types shared across every other `database` submodule.
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use crate::executor;
+
+/// A column's logical type.  Unified with `crate::parser::ColumnType` so there
+/// is a single source of truth across the parser and the storage layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColumnType {
+    /// 64-bit integer.
+    Int,
+    /// Boolean.
+    Boolean,
+    /// 32-bit float.
+    Float,
+    /// 64-bit float.
+    Double,
+    /// Fixed-point decimal.
+    Numeric,
+    /// UTF-8 text.
+    Text,
+    /// Variable-length UTF-8 text with a length limit.
+    Varchar(usize),
+    /// Calendar date.
+    Date,
+    /// Point in time.
+    Timestamp,
+    /// Fixed-width `f32` embedding vector (`f32[]`).
+    Vector,
+}
+
+/// A table schema: ordered column names and their types.
+#[derive(Debug, Clone)]
+pub struct Schema {
+    /// Column names in order.
+    pub columns: Vec<String>,
+    /// Column types, positionally aligned with `columns`.
+    pub types: Vec<ColumnType>,
+}
+
+impl Schema {
+    /// Looks up a column index by name.
+    pub fn index_of(&self, name: &str) -> Option<usize> {
+        self.columns.iter().position(|c| c == name)
+    }
+}
+
+/// Errors from executing a statement against a [`Database`](super::Database).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DbError {
+    /// A referenced column does not exist in the schema.
+    UnknownColumn(String),
+    /// A `WHERE` predicate compared against a non-integer column.
+    TypeMismatch,
+    /// A value literal did not match the column's declared type.
+    ColumnTypeMismatch(String),
+    /// A `VALUES` list had a different arity than the column list.
+    ArityMismatch,
+    /// `ORDER BY cosine(col, ?)` referenced a column that is not a vector.
+    NotAVectorColumn(String),
+    /// A `?` query parameter was expected but not supplied.
+    MissingParam,
+    /// A row id referenced during update/delete was not found in the B-Link tree.
+    RowNotFound(u64),
+    /// Raw bytes from the B-Link tree failed to decode as a valid row.
+    CorruptRow(u64),
+    /// Referenced table does not exist.
+    UnknownTable(String),
+    /// Transaction error.
+    TransactionError(String),
+    /// Table already exists (CREATE TABLE).
+    TableAlreadyExists(String),
+    /// A view (or table) with this name already exists (CREATE VIEW).
+    ViewAlreadyExists(String),
+    /// Referenced view does not exist (DROP VIEW).
+    UnknownView(String),
+    /// A view's defining query references its own not-yet-existing name.
+    RecursiveView(String),
+    /// A parsed feature is recognized but not yet supported by this engine.
+    Unsupported(String),
+    /// A scalar or `IN` subquery in a `WHERE` clause did not return the
+    /// required shape: a scalar subquery must return exactly one row and one
+    /// column; an `IN` subquery must return exactly one column.
+    SubqueryCardinality(String),
+    /// Execution error propagated from the executor.
+    Exec(executor::ExecError),
+}
+
+impl From<executor::ExecError> for DbError {
+    fn from(e: executor::ExecError) -> Self {
+        match e {
+            executor::ExecError::UnknownColumn(c) => DbError::UnknownColumn(c),
+            executor::ExecError::TypeMismatch => DbError::TypeMismatch,
+            executor::ExecError::GroupByColumnNotFound(c) => DbError::UnknownColumn(c),
+            executor::ExecError::UnresolvedSubquery => DbError::Unsupported(
+                "internal: subquery reached the pure evaluator unresolved".to_string(),
+            ),
+        }
+    }
+}
