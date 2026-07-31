@@ -47,6 +47,7 @@ pub fn aggregate_table(
         return Ok(ResultSet {
             columns: out_cols,
             rows: alloc::vec![out_row],
+            ..Default::default()
         });
     }
 
@@ -85,10 +86,13 @@ pub fn aggregate_table(
     Ok(ResultSet {
         columns: out_cols,
         rows: out_rows,
+        ..Default::default()
     })
 }
 
-fn eval_aggregate(
+/// Applies one aggregate function over `rows` (a full group, or — reused by
+/// [`super::window`] — an arbitrary window frame's row slice).
+pub(crate) fn eval_aggregate(
     func: AggregateFunc,
     column: &str,
     columns: &[String],

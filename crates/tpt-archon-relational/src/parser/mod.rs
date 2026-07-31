@@ -45,30 +45,39 @@ pub use ast::*;
 use ddl::{parse_alter_table, parse_create_table, parse_create_view};
 use dml::{parse_delete, parse_insert, parse_update};
 use lexer::{eq_ignore_case, expect_ident, expect_kw, Tok, TokenStream};
-use select::{parse_select_inner, parse_with_clause};
+use select::{parse_select_inner, parse_select_or_compound, parse_with_clause};
 
 pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
     let mut ts = TokenStream::new(input)?;
     match ts.next() {
         Tok::Ident(kw) if eq_ignore_case(&kw, "with") => {
-            let ctes = parse_with_clause(&mut ts)?;
+            let is_recursive = if let Tok::Ident(kw2) = ts.peek() {
+                if eq_ignore_case(&kw2, "recursive") {
+                    ts.next();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            let ctes = parse_with_clause(&mut ts, is_recursive)?;
             match ts.next() {
                 Tok::Ident(kw) if eq_ignore_case(&kw, "select") => {}
                 _ => return Err(ParseError("expected SELECT after WITH".to_string())),
             }
-            let mut stmt = parse_select_inner(&mut ts)?;
-            stmt.with_ctes = ctes;
+            let stmt = parse_select_or_compound(&mut ts, ctes)?;
             if !matches!(ts.next(), Tok::Eof) {
                 return Err(ParseError("trailing tokens after statement".to_string()));
             }
-            Ok(Statement::Select(stmt))
+            Ok(stmt)
         }
         Tok::Ident(kw) if eq_ignore_case(&kw, "select") => {
-            let stmt = parse_select_inner(&mut ts)?;
+            let stmt = parse_select_or_compound(&mut ts, Vec::new())?;
             if !matches!(ts.next(), Tok::Eof) {
                 return Err(ParseError("trailing tokens after statement".to_string()));
             }
-            Ok(Statement::Select(stmt))
+            Ok(stmt)
         }
         Tok::Ident(kw) if eq_ignore_case(&kw, "insert") => {
             parse_insert(&mut ts).map(Statement::Insert)
@@ -126,7 +135,17 @@ pub fn parse_select(input: &str) -> Result<SelectStatement, ParseError> {
     let ctes = if let Tok::Ident(kw) = ts.peek() {
         if eq_ignore_case(&kw, "with") {
             ts.next();
-            parse_with_clause(&mut ts)?
+            let is_recursive = if let Tok::Ident(kw2) = ts.peek() {
+                if eq_ignore_case(&kw2, "recursive") {
+                    ts.next();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            parse_with_clause(&mut ts, is_recursive)?
         } else {
             Vec::new()
         }

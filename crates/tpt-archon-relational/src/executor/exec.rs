@@ -23,7 +23,8 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
             }
             Ok(ResultSet {
                 columns: table.columns.clone(),
-                rows,
+                rows: table.rows.clone(),
+                ..Default::default()
             })
         }
         PlanNode::Filter { expr, input } => {
@@ -39,6 +40,7 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
             Ok(ResultSet {
                 columns: inner.columns,
                 rows,
+                ..Default::default()
             })
         }
         PlanNode::Project {
@@ -68,6 +70,7 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
             Ok(ResultSet {
                 columns: columns.clone(),
                 rows,
+                ..Default::default()
             })
         }
         PlanNode::Limit { n, input } => {
@@ -128,6 +131,7 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
             Ok(ResultSet {
                 columns,
                 rows: inner.rows,
+                ..Default::default()
             })
         }
     }

@@ -18,7 +18,7 @@ use super::storage::{
 use super::Database;
 
 impl Database {
-    pub(super) fn run_insert_stmt(&mut self, stmt: &InsertStatement) -> Result<(), DbError> {
+    pub(super) fn run_insert_stmt(&mut self, stmt: &InsertStatement) -> Result<u64, DbError> {
         let in_txn = self.in_transaction;
         if in_txn {
             self.ensure_txn(&stmt.table);
@@ -71,11 +71,12 @@ impl Database {
             maintain_vector_indexes_for_row(ts, id, &row);
             maybe_build_vector_indexes(ts)?;
         }
-        Ok(())
+        Ok(1)
     }
 
-    pub(super) fn run_update(&mut self, stmt: &UpdateStatement) -> Result<(), DbError> {
+    pub(super) fn run_update(&mut self, stmt: &UpdateStatement) -> Result<u64, DbError> {
         let matching: Vec<u64> = self.matching_row_ids(&stmt.table, stmt.filter.as_ref())?;
+        let count = matching.len() as u64;
         let in_txn = self.in_transaction;
         if in_txn {
             self.ensure_txn(&stmt.table);
@@ -134,11 +135,12 @@ impl Database {
                 maintain_vector_indexes_for_row(ts, id, &row);
             }
         }
-        Ok(())
+        Ok(count)
     }
 
-    pub(super) fn run_delete(&mut self, stmt: &DeleteStatement) -> Result<(), DbError> {
+    pub(super) fn run_delete(&mut self, stmt: &DeleteStatement) -> Result<u64, DbError> {
         let matching = self.matching_row_ids(&stmt.table, stmt.filter.as_ref())?;
+        let count = matching.len() as u64;
         let in_txn = self.in_transaction;
         if in_txn {
             self.ensure_txn(&stmt.table);
@@ -166,7 +168,7 @@ impl Database {
                 maintain_vector_indexes_on_delete(ts, id);
             }
         }
-        Ok(())
+        Ok(count)
     }
 
     /// Returns row ids from `table_name` whose rows satisfy the predicate.

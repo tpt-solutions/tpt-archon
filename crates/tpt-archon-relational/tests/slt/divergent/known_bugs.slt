@@ -57,21 +57,27 @@ INSERT INTO t2 (note) VALUES ('It''s')
 
 # --- Fact #2: qualified JOIN ON columns are broken ---------------------
 #
-# The parser accepts `JOIN ... ON t1.id = t2.t1_ref` fine (its `expect_ident`
-# helper generically merges `ident.ident` into a single "t1.id"-shaped
-# string) — but `run_select_scoped`'s join execution looks up that literal
-# qualified string directly against the left/right table's OWN unqualified
-# column list (what `scan_table` returns), which never contains a column
-# named "t1.id" — only "id". So any qualified ON column fails at execution
-# time with `UnknownColumn`, even though real Postgres supports qualified
-# join conditions without issue. Only unqualified ON columns work at all
-# (see supported/joins.slt), which is why this is filed as a real gap, not
-# a "divergent but intentional" case.
+# The parser accepts `JOIN ... ON t3.no_such_col = t4.t3_ref` fine (its
+# `expect_ident` helper generically merges `ident.ident` into a single
+# "t3.no_such_col"-shaped string) — but the join execution evaluates the ON
+# expression against *prefixed* column names ("t4.t3_ref"), not the table's
+# own unqualified names. Every table has an implicit `id` column (first
+# column), so a reference to `t3.id` (the original test query) would
+# suffix-match the implicit `id` of t3 and silently succeed instead of
+# failing. `t3.no_such_col` has no suffix match in either table's columns
+# ("id", "v", "t4.id", "t4.t3_ref") and therefore triggers the real bug:
+# UnknownColumn at row-evaluation time.
 statement ok
 CREATE TABLE t3 (v INT)
 
 statement ok
 CREATE TABLE t4 (t3_ref INT)
 
+statement ok
+INSERT INTO t3 (v) VALUES (1)
+
+statement ok
+INSERT INTO t4 (t3_ref) VALUES (1)
+
 statement error UnknownColumn
-SELECT v FROM t3 JOIN t4 ON t3.id = t4.t3_ref
+SELECT v FROM t3 JOIN t4 ON t3.no_such_col = t4.t3_ref

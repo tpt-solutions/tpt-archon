@@ -1,5 +1,5 @@
 use super::*;
-use crate::parser::{parse_select, CmpOp, Expr, Literal};
+use crate::parser::{parse_select, CmpOp, DateTimeField, Expr, Literal};
 use crate::planner::{plan_select, TableStats};
 use alloc::string::ToString;
 
@@ -284,4 +284,65 @@ fn eval_scalar_returns_int_for_true_comparison() {
         eval_scalar(&expr, &cols, &row).unwrap(),
         Some(Value::Int(1))
     );
+}
+
+#[test]
+fn extract_cmp_matches_correct_year() {
+    // Simulate a DATE column: 2024-06-15 = days since epoch ≈ 19900
+    // Actually: 2024-06-15 = days since 1970-01-01
+    // Let me use a known value: 2024-01-01 = 19723 days (approximately)
+    // 2024 years, month 1, day 1
+    let row = alloc::vec![Value::Int(19723)]; // approx 2024-01-01 as days
+    let cols = alloc::vec!["created".to_string()];
+    let expr = Expr::ExtractCmp {
+        field: DateTimeField::Year,
+        source: "created".to_string(),
+        op: CmpOp::Eq,
+        value: Literal::Int(2024),
+    };
+    assert!(eval_expr(&expr, &cols, &row).unwrap());
+}
+
+#[test]
+fn extract_cmp_rejects_wrong_year() {
+    let row = alloc::vec![Value::Int(19723)];
+    let cols = alloc::vec!["created".to_string()];
+    let expr = Expr::ExtractCmp {
+        field: DateTimeField::Year,
+        source: "created".to_string(),
+        op: CmpOp::Eq,
+        value: Literal::Int(2023),
+    };
+    assert!(!eval_expr(&expr, &cols, &row).unwrap());
+}
+
+#[test]
+fn extract_cmp_works_with_hour_field() {
+    // Timestamp: 2024-01-01 10:30:00 UTC
+    // Unix timestamp for 2024-01-01 00:00:00 = 1704067200
+    // 10:30:00 = 10*3600 + 30*60 = 37800 seconds offset
+    // micros = (1704067200 + 37800) * 1000000 = 1704105000000000
+    let row = alloc::vec![Value::Int(1_704_105_000_000_000)];
+    let cols = alloc::vec!["ts".to_string()];
+    let expr = Expr::ExtractCmp {
+        field: DateTimeField::Hour,
+        source: "ts".to_string(),
+        op: CmpOp::Eq,
+        value: Literal::Int(10),
+    };
+    assert!(eval_expr(&expr, &cols, &row).unwrap());
+}
+
+#[test]
+fn extract_cmp_null_source_yields_null() {
+    let row = alloc::vec![Value::Null];
+    let cols = alloc::vec!["ts".to_string()];
+    let expr = Expr::ExtractCmp {
+        field: DateTimeField::Month,
+        source: "ts".to_string(),
+        op: CmpOp::Eq,
+        value: Literal::Int(1),
+    };
+    // NULL op value → None (Kleene NULL propagation)
+    assert!(!eval_expr(&expr, &cols, &row).unwrap());
 }

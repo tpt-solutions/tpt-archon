@@ -28,7 +28,7 @@ use tpt_archon_core::btree::BTree;
 
 use crate::executor::ResultSet;
 use crate::mvcc;
-use crate::parser::{SelectStatement, Statement, TableRef};
+use crate::parser::{Expr, SelectStatement, Statement, TableRef};
 
 mod codec;
 mod ddl;
@@ -148,24 +148,29 @@ impl Database {
     }
 
     /// Executes a parsed [`Statement`], returning a [`ResultSet`] for queries.
-    pub fn execute(
-        &mut self,
-        stmt: &Statement,
-        params: &[Vec<f32>],
-    ) -> Result<ResultSet, DbError> {
+    pub fn execute(&mut self, stmt: &Statement, params: &[Vec<f32>]) -> Result<ResultSet, DbError> {
         match stmt {
             Statement::Select(s) => self.run_select(s, params),
             Statement::Insert(i) => {
-                self.run_insert_stmt(i)?;
-                Ok(empty_result_set())
+                let affected = self.run_insert_stmt(i)?;
+                Ok(ResultSet {
+                    affected: Some(affected),
+                    ..Default::default()
+                })
             }
             Statement::Update(u) => {
-                self.run_update(u)?;
-                Ok(empty_result_set())
+                let affected = self.run_update(u)?;
+                Ok(ResultSet {
+                    affected: Some(affected),
+                    ..Default::default()
+                })
             }
             Statement::Delete(d) => {
-                self.run_delete(d)?;
-                Ok(empty_result_set())
+                let affected = self.run_delete(d)?;
+                Ok(ResultSet {
+                    affected: Some(affected),
+                    ..Default::default()
+                })
             }
             Statement::CreateTable(ct) => {
                 self.run_create_table(ct)?;
@@ -195,6 +200,7 @@ impl Database {
                 self.run_rollback()?;
                 Ok(empty_result_set())
             }
+            Statement::Compound(cm) => self.run_compound(cm, params),
         }
     }
 
@@ -206,23 +212,65 @@ impl Database {
 }
 
 fn empty_result_set() -> ResultSet {
-    ResultSet {
-        columns: Vec::new(),
-        rows: Vec::new(),
-    }
+    ResultSet::default()
 }
 
-/// Whether `stmt`'s `FROM`/`JOIN` clauses reference the (not-yet-created)
-/// table/view name `name` — used to reject a self-referencing `CREATE VIEW`
-/// up front, since forward references are otherwise impossible (a view can
-/// only reference tables/views that already exist).
+/// Whether `stmt` (anywhere in its `FROM`/`JOIN` table references, including
+/// nested derived-table subqueries, or its `WHERE`/`HAVING` `EXISTS`/`IN`/
+/// scalar subqueries) references the (not-yet-created) table/view name
+/// `name` — used to reject a self-referencing `CREATE VIEW` or non-recursive
+/// `CTE` up front, since forward references are otherwise impossible (a view
+/// or plain CTE can only reference tables/views/CTEs that already exist).
+///
+/// Walks subqueries recursively rather than only the immediate `FROM`/`JOIN`
+/// clauses, closing a stack-overflow hole where a self-reference hidden
+/// inside a `WHERE`-clause subquery went undetected here and then recursed
+/// forever at execution time (each level re-resolving the same CTE/view name
+/// via `resolve_table_ref_with_ctes`, with no base case).
 fn select_references_table(stmt: &SelectStatement, name: &str) -> bool {
-    if let TableRef::Named { name: n, .. } = &stmt.table {
-        if n == name {
+    if table_ref_references_table(&stmt.table, name) {
+        return true;
+    }
+    if stmt
+        .joins
+        .iter()
+        .any(|j| table_ref_references_table(&j.table, name))
+    {
+        return true;
+    }
+    if let Some(f) = &stmt.filter {
+        if expr_references_table(f, name) {
             return true;
         }
     }
-    stmt.joins
-        .iter()
-        .any(|j| matches!(&j.table, TableRef::Named { name: n, .. } if n == name))
+    if let Some(h) = &stmt.having {
+        if expr_references_table(h, name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn table_ref_references_table(r: &TableRef, name: &str) -> bool {
+    match r {
+        TableRef::Named { name: n, .. } => n == name,
+        TableRef::Subquery { query, .. } => select_references_table(query, name),
+    }
+}
+
+fn expr_references_table(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::And(l, r) | Expr::Or(l, r) => {
+            expr_references_table(l, name) || expr_references_table(r, name)
+        }
+        Expr::Not(inner) => expr_references_table(inner, name),
+        Expr::Exists { query } | Expr::InSubquery { query, .. } | Expr::ScalarCmp { query, .. } => {
+            select_references_table(query, name)
+        }
+        // Leaf expressions reference columns, not tables — the caller handles
+        // column-to-table binding separately. Subqueries are the only Expr
+        // nodes that can introduce new table references.
+        Expr::ExtractCmp { .. } => false,
+        _ => false,
+    }
 }

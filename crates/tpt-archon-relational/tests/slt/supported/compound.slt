@@ -1,0 +1,58 @@
+# Compound queries: UNION / INTERSECT / EXCEPT.
+
+statement ok
+CREATE TABLE t1 (x INT)
+
+statement ok
+INSERT INTO t1 (x) VALUES (1)
+
+statement ok
+INSERT INTO t1 (x) VALUES (2)
+
+statement ok
+INSERT INTO t1 (x) VALUES (3)
+
+statement ok
+CREATE TABLE t2 (x INT)
+
+statement ok
+INSERT INTO t2 (x) VALUES (2)
+
+statement ok
+INSERT INTO t2 (x) VALUES (3)
+
+statement ok
+INSERT INTO t2 (x) VALUES (4)
+
+# UNION ALL: preserves duplicates
+query I
+SELECT x FROM t1 UNION ALL SELECT x FROM t2 ORDER BY x
+----
+1
+2
+2
+3
+3
+4
+
+# UNION: deduplicates
+query I
+SELECT x FROM t1 UNION SELECT x FROM t2 ORDER BY x
+----
+1
+2
+3
+4
+
+# INTERSECT: rows common to both
+query I
+SELECT x FROM t1 INTERSECT SELECT x FROM t2 ORDER BY x
+----
+2
+3
+
+# EXCEPT: rows in t1 but not in t2
+query I
+SELECT x FROM t1 EXCEPT SELECT x FROM t2 ORDER BY x
+----
+1

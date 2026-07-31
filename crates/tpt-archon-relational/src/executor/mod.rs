@@ -8,11 +8,12 @@
 //!
 //! Submodules mirror the file's original sections: [`value`] (the row/table
 //! data model and literal conversion), [`expr`] (`WHERE`/`HAVING` expression
-//! evaluation), [`aggregate`] (`GROUP BY` + aggregate functions), [`exec`]
-//! (walking a [`PlanNode`](crate::planner::PlanNode) tree), and [`vector`]
-//! (embedding similarity search). Only the items re-exported below are part
-//! of the crate's public surface; everything else is private to `executor`
-//! (or `pub(crate)` where [`database`](crate::database) or
+//! evaluation), [`aggregate`] (`GROUP BY` + aggregate functions), [`window`]
+//! (`OVER (...)` window functions), [`exec`] (walking a
+//! [`PlanNode`](crate::planner::PlanNode) tree), and [`vector`] (embedding
+//! similarity search). Only the items re-exported below are part of the
+//! crate's public surface; everything else is private to `executor` (or
+//! `pub(crate)` where [`database`](crate::database) or
 //! [`parser`](crate::parser) need it directly).
 
 mod aggregate;
@@ -22,6 +23,7 @@ mod expr;
 mod tests;
 mod value;
 mod vector;
+mod window;
 
 /// Rows processed per vectorized batch.
 pub const BATCH_SIZE: usize = 1024;
@@ -33,3 +35,4 @@ pub(crate) use expr::find_value;
 pub use expr::{eval_expr, eval_expr_scoped, eval_scalar};
 pub use value::*;
 pub use vector::vector_topk;
+pub use window::apply_window_funcs;

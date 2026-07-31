@@ -2,7 +2,7 @@
 
 use alloc::string::String;
 
-use crate::parser::{CmpOp, Expr};
+use crate::parser::{CmpOp, DateTimeField, Expr};
 
 use super::aggregate::agg_default_alias;
 use super::value::{literal_to_value, ExecError, Value};
@@ -78,11 +78,7 @@ pub(crate) fn find_value<'a>(
 }
 
 /// Evaluate an `Expr` against a row with the given column names.
-pub fn eval_expr(
-    expr: &Expr,
-    columns: &[String],
-    row: &[Value],
-) -> Result<bool, ExecError> {
+pub fn eval_expr(expr: &Expr, columns: &[String], row: &[Value]) -> Result<bool, ExecError> {
     match eval_expr_scoped(expr, columns, row, &[])? {
         Some(b) => Ok(b),
         None => Ok(false),
@@ -212,13 +208,31 @@ pub fn eval_expr_scoped(
             value,
         } => {
             let name = agg_default_alias(*func, column);
-            let v = find_value(&name, columns, row, outer).ok_or_else(|| ExecError::UnknownColumn(name))?;
+            let v = find_value(&name, columns, row, outer).ok_or(ExecError::UnknownColumn(name))?;
             let rhs = literal_to_value(value);
             match (v, &rhs) {
                 (Value::Null, _) | (_, Value::Null) => Ok(None),
                 (Value::Int(l), Value::Int(r)) => Ok(Some(eval_cmp(*op, *l, *r))),
                 (Value::Float(l), Value::Float(r)) => Ok(Some(eval_float_cmp(*op, *l, *r))),
                 (Value::Text(l), Value::Text(r)) => Ok(Some(eval_text_cmp(*op, l, r))),
+                _ => Err(ExecError::TypeMismatch),
+            }
+        }
+        Expr::ExtractCmp {
+            field,
+            source,
+            op,
+            value,
+        } => {
+            let v = find_value(source, columns, row, outer)
+                .ok_or_else(|| ExecError::UnknownColumn(source.clone()))?;
+            let rhs = literal_to_value(value);
+            match (v, &rhs) {
+                (Value::Null, _) | (_, Value::Null) => Ok(None),
+                (Value::Int(n), Value::Int(r)) => {
+                    let extracted = extract_datetime_field(*field, *n);
+                    Ok(Some(eval_cmp(*op, extracted, *r)))
+                }
                 _ => Err(ExecError::TypeMismatch),
             }
         }
@@ -301,4 +315,60 @@ pub fn eval_scalar(
         Some(false) => Ok(Some(Value::Int(0))),
         None => Ok(None),
     }
+}
+
+/// Microseconds in one day.
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+/// Threshold below which an integer is treated as days-since-epoch (Date)
+/// rather than microseconds-since-epoch (Timestamp).
+const DAYS_LIKE_THRESHOLD: i64 = 1_000_000_000_000;
+
+/// Extracts a date/time field from an integer value that is either
+/// days since epoch (Date) or microseconds since epoch (Timestamp).
+/// Returns the extracted field as an `i64`.
+pub fn extract_datetime_field(field: DateTimeField, value: i64) -> i64 {
+    // Heuristic: small absolute values are days; large ones are microseconds.
+    let micros = if value.unsigned_abs() < DAYS_LIKE_THRESHOLD as u64 {
+        value.saturating_mul(MICROS_PER_DAY)
+    } else {
+        value
+    };
+    match field {
+        DateTimeField::Year | DateTimeField::Month | DateTimeField::Day => {
+            let days = micros / MICROS_PER_DAY;
+            let (y, m, d) = civil_from_days(days);
+            match field {
+                DateTimeField::Year => y,
+                DateTimeField::Month => m,
+                DateTimeField::Day => d,
+                _ => unreachable!(),
+            }
+        }
+        DateTimeField::Hour => {
+            let total_secs = micros / 1_000_000;
+            (total_secs / 3600) % 24
+        }
+        DateTimeField::Minute => {
+            let total_secs = micros / 1_000_000;
+            (total_secs / 60) % 60
+        }
+        DateTimeField::Second => micros / 1_000_000,
+    }
+}
+
+/// Converts days since Unix epoch (1970-01-01) to (year, month, day).
+/// Uses Howard Hinnant's civil_from_days algorithm.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }

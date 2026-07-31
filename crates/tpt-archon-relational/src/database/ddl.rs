@@ -7,9 +7,7 @@ use tpt_archon_core::btree::BTree;
 
 use crate::executor::Value;
 use crate::mvcc;
-use crate::parser::{
-    AlterTableOp, AlterTableStatement, CreateTableStatement, CreateViewStatement,
-};
+use crate::parser::{AlterTableOp, AlterTableStatement, CreateTableStatement, CreateViewStatement};
 
 use super::codec::{encode_row, try_decode_row};
 use super::schema::{ColumnType, DbError, Schema};
@@ -28,18 +26,7 @@ impl Database {
         types.push(ColumnType::Int);
         for c in &ct.columns {
             columns.push(c.name.clone());
-            types.push(match c.ctype {
-                crate::parser::ColumnType::Int => ColumnType::Int,
-                crate::parser::ColumnType::Boolean => ColumnType::Boolean,
-                crate::parser::ColumnType::Float => ColumnType::Float,
-                crate::parser::ColumnType::Double => ColumnType::Double,
-                crate::parser::ColumnType::Numeric => ColumnType::Numeric,
-                crate::parser::ColumnType::Text => ColumnType::Text,
-                crate::parser::ColumnType::Varchar(_) => ColumnType::Varchar(255),
-                crate::parser::ColumnType::Date => ColumnType::Date,
-                crate::parser::ColumnType::Timestamp => ColumnType::Timestamp,
-                crate::parser::ColumnType::Vector => ColumnType::Vector,
-            });
+            types.push(c.ctype);
         }
         self.tables.push((
             ct.table.clone(),
@@ -89,18 +76,7 @@ impl Database {
                         col.name
                     )));
                 }
-                let ctype = match col.ctype {
-                    crate::parser::ColumnType::Int => ColumnType::Int,
-                    crate::parser::ColumnType::Boolean => ColumnType::Boolean,
-                    crate::parser::ColumnType::Float => ColumnType::Float,
-                    crate::parser::ColumnType::Double => ColumnType::Double,
-                    crate::parser::ColumnType::Numeric => ColumnType::Numeric,
-                    crate::parser::ColumnType::Text => ColumnType::Text,
-                    crate::parser::ColumnType::Varchar(_) => ColumnType::Varchar(255),
-                    crate::parser::ColumnType::Date => ColumnType::Date,
-                    crate::parser::ColumnType::Timestamp => ColumnType::Timestamp,
-                    crate::parser::ColumnType::Vector => ColumnType::Vector,
-                };
+                let ctype = col.ctype;
                 // Re-encode every row with the new column appended (default: Null).
                 let mut rows_to_reencode = Vec::new();
                 for id in 0..ts.next_row_id {

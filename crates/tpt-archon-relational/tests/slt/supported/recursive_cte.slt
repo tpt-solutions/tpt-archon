@@ -1,0 +1,40 @@
+# `WITH RECURSIVE` (Track A5). See ddl.slt for the corpus format convention.
+#
+# Mirrors `with_recursive_hierarchy_traversal` in database/tests.rs: an
+# adjacency-list hierarchy walked one generation per iteration via
+# `anchor UNION ALL recursive-term`, evaluated to a fixed point rather than
+# by naive self-referential recursion (see `Database::run_recursive_cte`).
+
+statement ok
+CREATE TABLE nodes (node_id INT, parent INT)
+
+statement ok
+INSERT INTO nodes (node_id, parent) VALUES (1, NULL)
+
+statement ok
+INSERT INTO nodes (node_id, parent) VALUES (2, 1)
+
+statement ok
+INSERT INTO nodes (node_id, parent) VALUES (3, 1)
+
+statement ok
+INSERT INTO nodes (node_id, parent) VALUES (4, 2)
+
+query I
+WITH RECURSIVE tree AS (
+    SELECT node_id, parent FROM nodes WHERE parent IS NULL
+    UNION ALL
+    SELECT node_id, parent FROM nodes AS n JOIN tree AS t ON n.parent = t.node_id
+) SELECT node_id FROM tree ORDER BY node_id
+----
+1
+2
+3
+4
+
+# A CTE inside a `WITH RECURSIVE` clause that doesn't actually self-reference
+# is legal — it's just an ordinary CTE.
+query I
+WITH RECURSIVE plain AS (SELECT node_id FROM nodes WHERE node_id = 1) SELECT node_id FROM plain
+----
+1

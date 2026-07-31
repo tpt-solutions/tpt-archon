@@ -5,32 +5,12 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::executor;
+use crate::parser;
 
-/// A column's logical type.  Unified with `crate::parser::ColumnType` so there
-/// is a single source of truth across the parser and the storage layer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ColumnType {
-    /// 64-bit integer.
-    Int,
-    /// Boolean.
-    Boolean,
-    /// 32-bit float.
-    Float,
-    /// 64-bit float.
-    Double,
-    /// Fixed-point decimal.
-    Numeric,
-    /// UTF-8 text.
-    Text,
-    /// Variable-length UTF-8 text with a length limit.
-    Varchar(usize),
-    /// Calendar date.
-    Date,
-    /// Point in time.
-    Timestamp,
-    /// Fixed-width `f32` embedding vector (`f32[]`).
-    Vector,
-}
+/// A column's logical type.  Re-exported from `crate::parser` so the parser
+/// and storage layers share a single `ColumnType` definition (no duplicated
+/// enums with manual match-arm bridging between them).
+pub use parser::ColumnType;
 
 /// A table schema: ordered column names and their types.
 #[derive(Debug, Clone)]
@@ -81,6 +61,8 @@ pub enum DbError {
     RecursiveView(String),
     /// A parsed feature is recognized but not yet supported by this engine.
     Unsupported(String),
+    /// Column count mismatch in a set operation (UNION / INTERSECT / EXCEPT).
+    ColumnCountMismatch,
     /// A scalar or `IN` subquery in a `WHERE` clause did not return the
     /// required shape: a scalar subquery must return exactly one row and one
     /// column; an `IN` subquery must return exactly one column.

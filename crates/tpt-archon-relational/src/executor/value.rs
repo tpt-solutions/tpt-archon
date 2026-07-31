@@ -48,9 +48,12 @@ impl Ord for Value {
             (_, Value::Null) => core::cmp::Ordering::Less,
             (Value::Int(_), _) => core::cmp::Ordering::Less,
             (_, Value::Int(_)) => core::cmp::Ordering::Greater,
-            (Value::Float(_), Value::Text(_)) | (Value::Float(_), Value::Vector(_)) => core::cmp::Ordering::Less,
-            (Value::Text(_), Value::Float(_))
-            | (Value::Vector(_), Value::Float(_)) => core::cmp::Ordering::Greater,
+            (Value::Float(_), Value::Text(_)) | (Value::Float(_), Value::Vector(_)) => {
+                core::cmp::Ordering::Less
+            }
+            (Value::Text(_), Value::Float(_)) | (Value::Vector(_), Value::Float(_)) => {
+                core::cmp::Ordering::Greater
+            }
             (Value::Text(_), Value::Vector(_)) => core::cmp::Ordering::Less,
             (Value::Vector(_), Value::Text(_)) => core::cmp::Ordering::Greater,
         }
@@ -102,12 +105,15 @@ pub enum ExecError {
 }
 
 /// The result of running a query: output column names and rows.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ResultSet {
     /// Output column names.
     pub columns: Vec<String>,
     /// Output rows.
     pub rows: Vec<Row>,
+    /// Number of rows affected by a DML statement (`INSERT`/`UPDATE`/`DELETE`),
+    /// or `None` for queries (`SELECT`/`Compound`).
+    pub affected: Option<u64>,
 }
 
 /// Converts a parser-level [`Literal`] into a runtime [`Value`].

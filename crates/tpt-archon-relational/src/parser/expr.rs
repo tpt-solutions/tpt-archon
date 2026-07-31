@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use super::ast::{AggregateFunc, CmpOp, Expr, Literal, ParseError};
+use super::ast::{AggregateFunc, CmpOp, DateTimeField, Expr, Literal, ParseError};
 use super::lexer::{
     eq_ignore_case, expect_ident, expect_int, expect_kw, expect_tok, is_kw, Tok, TokenStream,
 };
@@ -114,6 +114,61 @@ fn parse_primary_expr(ts: &mut TokenStream) -> Result<Expr, ParseError> {
                     })
                 }
                 _ => Ok(Expr::Agg { func, column: col }),
+            }
+        }
+        Tok::Ident(kw) if eq_ignore_case(&kw, "extract") => {
+            ts.next();
+            expect_tok(ts, Tok::LParen, "'(' after EXTRACT")?;
+            let field = match ts.next() {
+                Tok::Ident(f) if eq_ignore_case(&f, "year") => DateTimeField::Year,
+                Tok::Ident(f) if eq_ignore_case(&f, "month") => DateTimeField::Month,
+                Tok::Ident(f) if eq_ignore_case(&f, "day") => DateTimeField::Day,
+                Tok::Ident(f) if eq_ignore_case(&f, "hour") => DateTimeField::Hour,
+                Tok::Ident(f) if eq_ignore_case(&f, "minute") => DateTimeField::Minute,
+                Tok::Ident(f) if eq_ignore_case(&f, "second") => DateTimeField::Second,
+                other => {
+                    return Err(ParseError(alloc::format!(
+                        "expected date/time field (YEAR/MONTH/DAY/HOUR/MINUTE/SECOND) in EXTRACT, \
+                         got '{other:?}'"
+                    )));
+                }
+            };
+            expect_kw(ts, "from")?;
+            let source = expect_ident(ts, "column name in EXTRACT")?;
+            expect_tok(ts, Tok::RParen, "')' after EXTRACT")?;
+            match ts.peek() {
+                Tok::Ident(kw) if eq_ignore_case(&kw, "is") => {
+                    ts.next();
+                    let negated = match ts.next() {
+                        Tok::Ident(kw) if eq_ignore_case(&kw, "not") => {
+                            expect_kw(ts, "null")?;
+                            true
+                        }
+                        Tok::Ident(kw) if eq_ignore_case(&kw, "null") => false,
+                        _ => {
+                            return Err(ParseError(
+                                "expected NULL or NOT NULL after IS".to_string(),
+                            ))
+                        }
+                    };
+                    Ok(Expr::IsNull {
+                        column: source,
+                        negated,
+                    })
+                }
+                Tok::Op(op) => {
+                    ts.next();
+                    let value = parse_literal(ts)?;
+                    Ok(Expr::ExtractCmp {
+                        field,
+                        source,
+                        op,
+                        value,
+                    })
+                }
+                _ => Err(ParseError(
+                    "expected comparison operator or IS NULL after EXTRACT(...)".to_string(),
+                )),
             }
         }
         Tok::Ident(col) => {

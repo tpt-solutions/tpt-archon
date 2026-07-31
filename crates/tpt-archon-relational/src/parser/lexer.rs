@@ -332,6 +332,7 @@ pub(super) fn is_kw(s: &str) -> bool {
             | "rollback"
             | "not"
             | "exists"
+            | "extract"
     )
 }
 

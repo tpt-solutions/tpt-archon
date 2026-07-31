@@ -179,8 +179,8 @@ fn parses_join() {
             alias: None
         }
     );
-    assert_eq!(s.joins[0].left_col, "t1.id");
-    assert_eq!(s.joins[0].right_col, "t2.t1_id");
+    assert_eq!(s.joins[0].jtype, JoinType::Inner);
+    assert!(s.joins[0].on_expr.is_some());
 }
 
 #[test]
@@ -401,6 +401,56 @@ fn long_not_chain_returns_parse_error_not_stack_overflow() {
     sql.push_str("a = 1");
     let r = parse_statement(&sql);
     assert!(r.is_err(), "50,000 chained NOTs must be rejected");
+}
+
+#[test]
+fn parses_extract_cmp_in_where() {
+    let s = parse_select("SELECT * FROM t WHERE EXTRACT(YEAR FROM created) = 2024").unwrap();
+    assert_eq!(
+        s.filter,
+        Some(Expr::ExtractCmp {
+            field: DateTimeField::Year,
+            source: "created".to_string(),
+            op: CmpOp::Eq,
+            value: Literal::Int(2024),
+        })
+    );
+}
+
+#[test]
+fn parses_extract_is_null() {
+    let s = parse_select("SELECT * FROM t WHERE EXTRACT(month FROM ts) IS NULL").unwrap();
+    assert_eq!(
+        s.filter,
+        Some(Expr::IsNull {
+            column: "ts".to_string(),
+            negated: false,
+        })
+    );
+}
+
+#[test]
+fn parses_extract_is_not_null() {
+    let s = parse_select("SELECT * FROM t WHERE EXTRACT(day FROM started) IS NOT NULL").unwrap();
+    assert_eq!(
+        s.filter,
+        Some(Expr::IsNull {
+            column: "started".to_string(),
+            negated: true,
+        })
+    );
+}
+
+#[test]
+fn rejects_extract_without_operator() {
+    let r = parse_statement("SELECT * FROM t WHERE EXTRACT(YEAR FROM col)");
+    assert!(r.is_err(), "EXTRACT without operator must be rejected");
+}
+
+#[test]
+fn extract_requires_source_column() {
+    let r = parse_statement("SELECT * FROM t WHERE EXTRACT(YEAR FROM 42) = 1");
+    assert!(r.is_err(), "EXTRACT requires a column name");
 }
 
 #[test]

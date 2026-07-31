@@ -134,6 +134,9 @@ fn fmt_db_error(e: &DbError) -> String {
         DbError::RecursiveView(v) => format!("view '{v}' cannot reference itself"),
         DbError::Unsupported(m) => format!("unsupported: {m}"),
         DbError::SubqueryCardinality(m) => format!("subquery error: {m}"),
+        DbError::ColumnCountMismatch => {
+            "each UNION/INTERSECT/EXCEPT query must have the same number of columns".to_string()
+        }
         DbError::Exec(e) => format!("execution error: {e:?}"),
     }
 }

@@ -120,9 +120,8 @@ fn vector_topk_with_where_filter() {
         d.execute(&parse_statement(&sql).unwrap(), &[]).unwrap();
     }
     // Without WHERE: top-2 by cosine to [1,0] would be id=0, id=3.
-    let sel =
-        parse_statement("SELECT id FROM t WHERE tag = 'a' ORDER BY cosine(emb, ?) LIMIT 2")
-            .unwrap();
+    let sel = parse_statement("SELECT id FROM t WHERE tag = 'a' ORDER BY cosine(emb, ?) LIMIT 2")
+        .unwrap();
     let r = d.execute(&sel, &[alloc::vec![1.0, 0.0]]).unwrap();
     assert_eq!(r.rows.len(), 2);
     // tag='a' rows: id=0 ([1,0]), id=2 ([0.9,0.1]) → both kept
@@ -971,10 +970,8 @@ fn having_filters_groups() {
     }
     let r = d
         .execute(
-            &parse_statement(
-                "SELECT dept, COUNT(*) AS cnt FROM t GROUP BY dept HAVING cnt >= 2",
-            )
-            .unwrap(),
+            &parse_statement("SELECT dept, COUNT(*) AS cnt FROM t GROUP BY dept HAVING cnt >= 2")
+                .unwrap(),
             &[],
         )
         .unwrap();
@@ -1075,10 +1072,8 @@ fn uncorrelated_exists_is_cached() {
     // Should return all rows since t2 has at least one row.
     let r = d
         .execute(
-            &parse_statement(
-                "SELECT id FROM t WHERE EXISTS (SELECT val FROM t2 WHERE val > 5)",
-            )
-            .unwrap(),
+            &parse_statement("SELECT id FROM t WHERE EXISTS (SELECT val FROM t2 WHERE val > 5)")
+                .unwrap(),
             &[],
         )
         .unwrap();
@@ -1086,10 +1081,8 @@ fn uncorrelated_exists_is_cached() {
     // No matching row: t2.val = 10, not < 5.
     let r2 = d
         .execute(
-            &parse_statement(
-                "SELECT id FROM t WHERE EXISTS (SELECT val FROM t2 WHERE val < 5)",
-            )
-            .unwrap(),
+            &parse_statement("SELECT id FROM t WHERE EXISTS (SELECT val FROM t2 WHERE val < 5)")
+                .unwrap(),
             &[],
         )
         .unwrap();
@@ -1199,4 +1192,189 @@ fn uncorrelated_scalar_subquery_is_cached() {
         .unwrap();
     assert_eq!(r.rows.len(), 1);
     assert_eq!(r.rows[0][0], Value::Int(4));
+}
+
+#[test]
+fn with_recursive_hierarchy_traversal() {
+    // Classic adjacency-list traversal: nodes(node_id, parent), root has a
+    // NULL parent. The recursive term walks one generation per iteration.
+    let mut d = Database::empty();
+    for sql in [
+        "CREATE TABLE nodes (node_id INT, parent INT)",
+        "INSERT INTO nodes (node_id, parent) VALUES (1, NULL)",
+        "INSERT INTO nodes (node_id, parent) VALUES (2, 1)",
+        "INSERT INTO nodes (node_id, parent) VALUES (3, 1)",
+        "INSERT INTO nodes (node_id, parent) VALUES (4, 2)",
+    ] {
+        d.execute(&parse_statement(sql).unwrap(), &[]).unwrap();
+    }
+    let r = d
+        .execute(
+            &parse_statement(
+                "WITH RECURSIVE tree AS ( \
+                    SELECT node_id, parent FROM nodes WHERE parent IS NULL \
+                    UNION ALL \
+                    SELECT node_id, parent FROM nodes AS n JOIN tree AS t ON n.parent = t.node_id \
+                 ) SELECT node_id FROM tree",
+            )
+            .unwrap(),
+            &[],
+        )
+        .unwrap();
+    let mut ids: Vec<i64> = r
+        .rows
+        .iter()
+        .map(|row| match &row[0] {
+            Value::Int(n) => *n,
+            other => panic!("expected Int, got {other:?}"),
+        })
+        .collect();
+    ids.sort();
+    assert_eq!(ids, alloc::vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn with_recursive_non_self_referencing_cte_still_works() {
+    // A CTE inside a `WITH RECURSIVE` clause that doesn't actually
+    // self-reference is legal (just an ordinary CTE).
+    let mut d = Database::empty();
+    d.execute(&parse_statement("CREATE TABLE t (v INT)").unwrap(), &[])
+        .unwrap();
+    d.execute(
+        &parse_statement("INSERT INTO t (v) VALUES (7)").unwrap(),
+        &[],
+    )
+    .unwrap();
+    let r = d
+        .execute(
+            &parse_statement("WITH RECURSIVE cte AS (SELECT v FROM t) SELECT v FROM cte").unwrap(),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(r.rows, alloc::vec![alloc::vec![Value::Int(7)]]);
+}
+
+#[test]
+fn with_recursive_non_terminating_hits_iteration_cap() {
+    // A recursive term with no base case that shrinks the working set never
+    // reaches a fixed point; this must surface as a `DbError`, not hang or
+    // stack-overflow the process.
+    let mut d = Database::empty();
+    d.execute(&parse_statement("CREATE TABLE t (v INT)").unwrap(), &[])
+        .unwrap();
+    d.execute(
+        &parse_statement("INSERT INTO t (v) VALUES (1)").unwrap(),
+        &[],
+    )
+    .unwrap();
+    let r = d.execute(
+        &parse_statement(
+            "WITH RECURSIVE cte AS ( \
+                SELECT v FROM t \
+                UNION ALL \
+                SELECT v FROM cte \
+             ) SELECT v FROM cte",
+        )
+        .unwrap(),
+        &[],
+    );
+    assert!(matches!(r, Err(DbError::Unsupported(_))));
+}
+
+#[test]
+fn cte_self_reference_hidden_in_where_subquery_is_rejected() {
+    // Closes the stack-overflow hole: `select_references_table` used to only
+    // walk FROM/JOIN, so a self-reference hidden inside a WHERE-clause
+    // subquery went undetected and recursed forever at execution time.
+    let mut d = Database::empty();
+    d.execute(&parse_statement("CREATE TABLE t (v INT)").unwrap(), &[])
+        .unwrap();
+    let r = d.execute(
+        &parse_statement(
+            "WITH cte AS (SELECT v FROM t WHERE v IN (SELECT v FROM cte)) SELECT v FROM cte",
+        )
+        .unwrap(),
+        &[],
+    );
+    assert!(matches!(r, Err(DbError::RecursiveView(_))));
+}
+
+fn parse(s: &str) -> crate::parser::Statement {
+    crate::parser::parse_statement(s).unwrap()
+}
+
+#[test]
+fn extract_year_from_date_column() {
+    let mut d = Database::empty();
+    d.execute(&parse("CREATE TABLE events (id INT, happened DATE)"), &[])
+        .unwrap();
+    // 2024-06-15 = 19889 days since epoch (approx)
+    d.execute(
+        &parse("INSERT INTO events (id, happened) VALUES (1, 19889)"),
+        &[],
+    )
+    .unwrap();
+    // 2023-01-01 = 19358 days since epoch (approx)
+    d.execute(
+        &parse("INSERT INTO events (id, happened) VALUES (2, 19358)"),
+        &[],
+    )
+    .unwrap();
+    let r = d
+        .execute(
+            &parse("SELECT id FROM events WHERE EXTRACT(YEAR FROM happened) = 2024"),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(r.rows[0][0], Value::Int(1));
+}
+
+#[test]
+fn extract_month_from_date_column() {
+    let mut d = Database::empty();
+    d.execute(&parse("CREATE TABLE events (id INT, happened DATE)"), &[])
+        .unwrap();
+    // March = month 3. Days since epoch for 2024-03-15...
+    // 2024-03-15: year=2024, month=3, day=15
+    // 2024-01-01 = 19723 days since epoch
+    // 2024-03-15 = 19723 + 31 (Jan) + 29 (Feb leap) + 14 = 19797
+    d.execute(
+        &parse("INSERT INTO events (id, happened) VALUES (1, 19797)"),
+        &[],
+    )
+    .unwrap();
+    // 2024-06-15 = 19723 + 31 + 29 + 31 + 30 + 31 + 14 = 19889
+    d.execute(
+        &parse("INSERT INTO events (id, happened) VALUES (2, 19889)"),
+        &[],
+    )
+    .unwrap();
+    let r = d
+        .execute(
+            &parse("SELECT id FROM events WHERE EXTRACT(MONTH FROM happened) >= 4"),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(r.rows[0][0], Value::Int(2));
+}
+
+#[test]
+fn extract_is_null_on_nullable_date() {
+    let mut d = Database::empty();
+    d.execute(&parse("CREATE TABLE t (id INT, d DATE)"), &[])
+        .unwrap();
+    d.execute(&parse("INSERT INTO t (id, d) VALUES (1, NULL)"), &[])
+        .unwrap();
+    d.execute(&parse("INSERT INTO t (id, d) VALUES (2, 19723)"), &[])
+        .unwrap();
+    let r = d
+        .execute(
+            &parse("SELECT id FROM t WHERE EXTRACT(YEAR FROM d) IS NULL"),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(r.rows[0][0], Value::Int(1));
 }

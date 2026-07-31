@@ -164,6 +164,8 @@ fn selectivity(expr: &Expr) -> (u64, u64) {
         Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::ScalarCmp { .. } => (1, 3),
         // Aggregate expressions are resolved after GROUP BY; default estimate.
         Expr::Agg { .. } | Expr::AggCmp { .. } => (1, 3),
+        // EXTRACT is a scalar projection, not a selective predicate; default estimate.
+        Expr::ExtractCmp { .. } => (1, 3),
     }
 }
 

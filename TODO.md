@@ -332,41 +332,72 @@ rather than softening the claim. Order matters within Track A; Tracks A/B/C
 can otherwise proceed in parallel once their own prerequisites land.
 
 ### Track A — SQL dialect expansion (`tpt-archon-relational`)
-- [ ] **A0** Tokenizer rewrite: replace the single-token lossy `push_back`
+- [x] **A0** Tokenizer rewrite: replace the single-token lossy `push_back`
   (`parser.rs:709-734`) with a real pre-tokenized stream supporting
   multi-token lookahead and backtracking. Every phase below needs 2-3 token
   lookahead (`LEFT [OUTER] JOIN`, `UNION [ALL]`, `WITH RECURSIVE`,
   `NUMERIC(p,s)`) that `push_back` structurally cannot give; it is also
   already the source of a live bug (`ALTER TABLE t ADD COLUMN v VECTOR`
   with no `[N]` rewinds over an unread token).
-- [ ] **A1** General scalar `Expr` tree + `eval_scalar` + three-valued logic
+- [x] **A1** General scalar `Expr` tree + `eval_scalar` + three-valued logic
   (Kleene `NULL` propagation, not NULL-as-false). Prerequisite for joins,
   set-ops, recursive CTEs, and window functions alike. Also fixes two live
   bugs found during the audit: a `HAVING COUNT(col)` alias mismatch with
   the SELECT-list alias (`parser.rs:1343` vs `executor.rs:350-363`), and
   `ORDER BY` on a column not in the SELECT list silently sorting by column
   0 (`executor.rs:571-574`).
-- [ ] **A2** Type system: `BOOLEAN`, `FLOAT`/`DOUBLE`, `NUMERIC(p,s)`,
+- [x] **A2** Type system: `BOOLEAN`, `FLOAT`/`DOUBLE`, `NUMERIC(p,s)`,
   `DATE`, `TIMESTAMP`, `VARCHAR(n)` — unify the duplicated
   `parser::ColumnType` / `database::ColumnType` enums first (bridged today
   by hand-written match arms at `database.rs:448-450`/`502-504`, tolerable
   at 3 variants, a bug farm at 9).
-- [ ] **A3** Joins: `LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`, multi-condition and
-  arbitrary `ON` expressions. Requires replacing the eager,
-  single-column-equality join hack in `database.rs:1386-1417` with a real
-  `PlanNode::Join` executed through the normal planner/executor path — not
-  patchable in place: there is currently no passing end-to-end join test at
-  all, and qualified-column binding (`t1.col` vs `t2.col`) is already
-  broken.
-- [ ] **A4** `UNION`/`INTERSECT`/`EXCEPT` (with and without `ALL`),
+- [x] **A3** Joins: `LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`, multi-condition and
+  arbitrary `ON` expressions. Implemented directly in `run_select_scoped`
+  (`database/select.rs`) as a nested-loop join evaluating a general `Expr`
+  `ON` clause per join type (`Inner`/`Left`/`Right`/`Full`/`Cross`), rather
+  than a `PlanNode::Join` — the WHERE/HAVING paths already run outside the
+  cost-based planner for the same DB-aware-evaluation reason (see
+  `run_select_scoped`'s comment on clearing `filter` before `plan_select`),
+  so a separate join plan node would have needed the same bypass anyway.
+  Qualified-column binding (`t3.col` vs `t4.col`) is still suffix-match-only
+  (not per-table exact resolution) — intentionally left as-is and tracked as
+  a known bug in `tests/slt/divergent/known_bugs.slt` fact #2, not silently
+  fixed as a side effect of A3.
+- [x] **A4** `UNION`/`INTERSECT`/`EXCEPT` (with and without `ALL`),
   including the `Query`-wrapper AST refactor (CTEs/ORDER BY/LIMIT move off
   `SelectStatement` onto the whole query, matching Postgres scoping).
-- [ ] **A5** `WITH RECURSIVE`, built on A4's set-op AST (a recursive CTE is
-  formally `anchor UNION [ALL] recursive-term`). Also closes a
-  stack-overflow hole where a CTE that self-references through a subquery
-  currently recurses forever (`select_references_table`,
-  `database.rs:1722-1731`, only walks `FROM`/joins today).
-- [ ] **A6** Window functions (`OVER`, `PARTITION BY`, `ORDER BY` within
+  Implemented as `ast::CompoundStatement` (`first` select core + `Vec<(SetOperation,
+  SelectStatement)>` + compound-level `order_by`/`limit`) and
+  `Statement::Compound`, parsed by `parse_select_or_compound` and executed by
+  `Database::run_compound` (`database/select.rs`). `UNION`/`INTERSECT` sort +
+  dedup; `UNION ALL` doesn't; column-count mismatch across operands is a
+  `DbError::ColumnCountMismatch`. CTEs remain on the individual `SelectStatement`
+  operands rather than hoisted onto `CompoundStatement` itself (no test case
+  needed a CTE shared across both sides of a set op yet); revisit if one comes
+  up.
+- [x] **A5** `WITH RECURSIVE`, built on A4's set-op AST (a recursive CTE is
+  formally `anchor UNION [ALL] recursive-term`). `ast::CTE` gained a
+  `recursive_term: Option<(SetOperation, Box<SelectStatement>)>` field;
+  `Database::run_recursive_cte` (`database/select.rs`) evaluates it to a
+  fixed point (anchor once, then the recursive term repeatedly against only
+  the *previous* iteration's new rows — the standard "working table"
+  semantics — via a new `recursive_binding` override threaded through
+  `run_select_scoped`/`resolve_table_ref_with_ctes`), with a hard 10,000-
+  iteration cap turning a non-terminating recursive term into a `DbError`
+  instead of a hang. Only a single `UNION`/`UNION ALL` between exactly two
+  select cores is accepted for a recursive CTE (`INTERSECT`/`EXCEPT`, or more
+  than one operator, are parse errors — matching Postgres's own restriction).
+  Also closes the stack-overflow hole where a CTE/view that self-references
+  through a `WHERE`-clause subquery went undetected: `select_references_table`
+  (`database/mod.rs`) now walks `Subquery` table refs and
+  `Exists`/`InSubquery`/`ScalarCmp` expressions recursively instead of only
+  the immediate `FROM`/`JOIN`. Tests: `database/tests.rs`
+  (`with_recursive_hierarchy_traversal`,
+  `with_recursive_non_self_referencing_cte_still_works`,
+  `with_recursive_non_terminating_hits_iteration_cap`,
+  `cte_self_reference_hidden_in_where_subquery_is_rejected`) and
+  `tests/slt/supported/recursive_cte.slt`.
+- [x] **A6** Window functions (`OVER`, `PARTITION BY`, `ORDER BY` within
   `OVER`, `ROW_NUMBER`/`RANK`/`DENSE_RANK`/`LAG`/`LEAD`/aggregates-as-
   window-functions), default + `ROWS` frames only; `RANGE`/`GROUPS` with
   numeric offsets explicitly rejected as `Unsupported` rather than silently

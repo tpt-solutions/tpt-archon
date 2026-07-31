@@ -62,6 +62,7 @@ impl Database {
             }
             Expr::Not(inner) => Self::expr_references_outer(inner, own_columns),
             Expr::Agg { .. } | Expr::AggCmp { .. } => false,
+            Expr::ExtractCmp { source, .. } => !Self::column_resolves_locally(source, own_columns),
             Expr::Exists { query }
             | Expr::InSubquery { query, .. }
             | Expr::ScalarCmp { query, .. } => {
@@ -178,7 +179,8 @@ impl Database {
                             own_columns,
                         ) =>
                     {
-                        if let Ok(rs) = self.run_select_scoped(query, params, &[], outer_ctes) {
+                        if let Ok(rs) = self.run_select_scoped(query, params, &[], outer_ctes, None)
+                        {
                             cache[idx] = CacheEntry::Exists(!rs.rows.is_empty());
                         }
                     }
@@ -191,7 +193,8 @@ impl Database {
                             own_columns,
                         ) =>
                     {
-                        if let Ok(rs) = self.run_select_scoped(query, params, &[], outer_ctes) {
+                        if let Ok(rs) = self.run_select_scoped(query, params, &[], outer_ctes, None)
+                        {
                             let vals: Vec<Value> =
                                 rs.rows.into_iter().map(|r| r[0].clone()).collect();
                             cache[idx] = CacheEntry::In(vals);
@@ -210,7 +213,8 @@ impl Database {
                         own_columns,
                     ) =>
                     {
-                        if let Ok(rs) = self.run_select_scoped(query, params, &[], outer_ctes) {
+                        if let Ok(rs) = self.run_select_scoped(query, params, &[], outer_ctes, None)
+                        {
                             if rs.rows.len() == 1 && rs.columns.len() == 1 {
                                 cache[idx] = CacheEntry::Scalar(rs.rows[0][0].clone());
                             }
@@ -357,7 +361,8 @@ impl Database {
                 assert!(depth <= 8, "correlation nesting too deep");
                 stack[0] = (scope_columns, row);
                 stack[1..depth].copy_from_slice(outer);
-                let rs = self.run_select_scoped(query, params, &stack[..depth], outer_ctes)?;
+                let rs =
+                    self.run_select_scoped(query, params, &stack[..depth], outer_ctes, None)?;
                 Ok(Some(!rs.rows.is_empty()))
             }
             Expr::InSubquery { column, query } => {
@@ -373,7 +378,8 @@ impl Database {
                 assert!(depth <= 8, "correlation nesting too deep");
                 stack[0] = (scope_columns, row);
                 stack[1..depth].copy_from_slice(outer);
-                let rs = self.run_select_scoped(query, params, &stack[..depth], outer_ctes)?;
+                let rs =
+                    self.run_select_scoped(query, params, &stack[..depth], outer_ctes, None)?;
                 if rs.columns.len() != 1 {
                     return Err(DbError::SubqueryCardinality(alloc::format!(
                         "IN subquery must return exactly one column, got {}",
@@ -406,7 +412,8 @@ impl Database {
                 assert!(depth <= 8, "correlation nesting too deep");
                 stack[0] = (scope_columns, row);
                 stack[1..depth].copy_from_slice(outer);
-                let rs = self.run_select_scoped(query, params, &stack[..depth], outer_ctes)?;
+                let rs =
+                    self.run_select_scoped(query, params, &stack[..depth], outer_ctes, None)?;
                 if rs.columns.len() != 1 || rs.rows.len() != 1 {
                     return Err(DbError::SubqueryCardinality(alloc::format!(
                         "scalar subquery must return exactly one row and one column, got {} row(s) and {} column(s)",

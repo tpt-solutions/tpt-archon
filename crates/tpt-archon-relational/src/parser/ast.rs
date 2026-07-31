@@ -37,6 +37,24 @@ pub enum Literal {
     Null,
 }
 
+/// A field that can be extracted from a `DATE`/`TIMESTAMP` value via
+/// `EXTRACT(field FROM source)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateTimeField {
+    /// Calendar year (e.g. 2024).
+    Year,
+    /// Calendar month (1–12).
+    Month,
+    /// Day of the month (1–31).
+    Day,
+    /// Hour of the day (0–23).
+    Hour,
+    /// Minute of the hour (0–59).
+    Minute,
+    /// Second (0–59, including fractional seconds as integer microseconds).
+    Second,
+}
+
 /// A boolean expression tree used in `WHERE` clauses, `HAVING`, etc.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -145,6 +163,115 @@ pub enum Expr {
         /// The right-hand value.
         value: Literal,
     },
+    /// `EXTRACT(field FROM source) <op> value` — extracts a date/time field
+    /// from a `DATE` or `TIMESTAMP` column and compares it against a literal.
+    /// If `source` evaluates to `NULL`, the result is `NULL` (three-valued
+    /// logic).
+    ExtractCmp {
+        /// The field to extract (year, month, day, hour, minute, second).
+        field: DateTimeField,
+        /// The source column name.
+        source: String,
+        /// The comparison operator.
+        op: CmpOp,
+        /// The right-hand literal value.
+        value: Literal,
+    },
+}
+
+/// A window function: `ROW_NUMBER`/`RANK`/`DENSE_RANK` (no arguments),
+/// `LAG`/`LEAD` (offset-based access to a sibling row), or an existing
+/// aggregate used as a window function (`SUM(x) OVER (...)`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowFunc {
+    /// `ROW_NUMBER()`: 1, 2, 3, ... within each partition, in `ORDER BY` order.
+    RowNumber,
+    /// `RANK()`: like `ROW_NUMBER`, but tied rows (by `ORDER BY`) share a
+    /// rank and the next rank skips ahead by the tie's size.
+    Rank,
+    /// `DENSE_RANK()`: like `RANK`, but without the gaps after a tie.
+    DenseRank,
+    /// `LAG(column [, offset [, default]])`: the value of `column` `offset`
+    /// rows before the current row within its partition (`offset` defaults
+    /// to 1; out-of-range yields `default` or `NULL`).
+    Lag {
+        /// The column to read.
+        column: String,
+        /// How many rows back (default 1).
+        offset: i64,
+        /// Value to use when the offset falls outside the partition.
+        default: Option<Literal>,
+    },
+    /// `LEAD(column [, offset [, default]])`: like `LAG`, but forward.
+    Lead {
+        /// The column to read.
+        column: String,
+        /// How many rows forward (default 1).
+        offset: i64,
+        /// Value to use when the offset falls outside the partition.
+        default: Option<Literal>,
+    },
+    /// An aggregate function used as a window function over `spec`'s frame,
+    /// e.g. `SUM(amount) OVER (PARTITION BY dept ORDER BY hired ROWS ...)`.
+    Agg {
+        /// The aggregate function.
+        func: AggregateFunc,
+        /// The column argument (`*` for `COUNT(*)`).
+        column: String,
+    },
+}
+
+/// One bound of a `ROWS BETWEEN <start> AND <end>` window frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameBound {
+    /// `UNBOUNDED PRECEDING` — the first row of the partition.
+    UnboundedPreceding,
+    /// `<n> PRECEDING`.
+    Preceding(u64),
+    /// `CURRENT ROW`.
+    CurrentRow,
+    /// `<n> FOLLOWING`.
+    Following(u64),
+    /// `UNBOUNDED FOLLOWING` — the last row of the partition.
+    UnboundedFollowing,
+}
+
+/// A `ROWS BETWEEN <start> AND <end>` window frame (numeric offsets only).
+/// `RANGE`/`GROUPS` frames are rejected at parse time
+/// (`parser::select::parse_window_spec`) rather than silently mistreated as
+/// `ROWS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowFrame {
+    /// The frame's starting bound.
+    pub start: FrameBound,
+    /// The frame's ending bound.
+    pub end: FrameBound,
+}
+
+/// A window specification: `OVER (PARTITION BY ... ORDER BY ... [frame])`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowSpec {
+    /// `PARTITION BY` columns (rows are windowed independently per group).
+    pub partition_by: Vec<String>,
+    /// `ORDER BY` columns within each partition.
+    pub order_by: Vec<OrderBy>,
+    /// Explicit `ROWS BETWEEN ...` frame. When `None`, the default applies:
+    /// the whole partition if `order_by` is empty, otherwise
+    /// `UNBOUNDED PRECEDING .. CURRENT ROW` (a `ROWS`-only approximation of
+    /// Postgres's default `RANGE` frame — ties in `order_by` are not given
+    /// the same peer-group treatment real `RANGE` semantics would give them).
+    /// Only meaningful for [`WindowFunc::Agg`]; ranking/`LAG`/`LEAD`
+    /// functions ignore the frame entirely, per the SQL standard.
+    pub frame: Option<WindowFrame>,
+}
+
+/// A window function call: `func(...) OVER (...)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowCall {
+    /// The function being computed.
+    pub func: WindowFunc,
+    /// Its window specification.
+    pub spec: WindowSpec,
 }
 
 /// A column reference with optional sort direction.
@@ -210,6 +337,14 @@ pub enum ColumnType {
 pub enum JoinType {
     /// `JOIN` or `INNER JOIN`.
     Inner,
+    /// `LEFT [OUTER] JOIN`.
+    Left,
+    /// `RIGHT [OUTER] JOIN`.
+    Right,
+    /// `FULL [OUTER] JOIN`.
+    Full,
+    /// `CROSS JOIN` (no ON clause).
+    Cross,
 }
 
 /// A reference to a table, view, CTE, or derived (subquery) source in a
@@ -253,17 +388,16 @@ impl TableRef {
     }
 }
 
-/// A join clause: `JOIN <table> ON <left_col> = <right_col>`.
+/// A join clause: `[INNER|LEFT|RIGHT|FULL] JOIN <table> ON <expr>`
+/// or `CROSS JOIN <table>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Join {
     /// Join type.
     pub jtype: JoinType,
     /// The table to join with.
     pub table: TableRef,
-    /// The column from the left table.
-    pub left_col: String,
-    /// The column from the right table.
-    pub right_col: String,
+    /// The ON expression (None for CROSS JOIN).
+    pub on_expr: Option<Expr>,
 }
 
 /// A parsed `SELECT` statement.
@@ -283,6 +417,8 @@ pub struct SelectStatement {
     pub group_by: Vec<String>,
     /// Optional aggregate projections: `alias -> (func, column)`.
     pub aggregates: Vec<(String, AggregateFunc, String)>,
+    /// Optional window function projections: `alias -> call`.
+    pub window_funcs: Vec<(String, WindowCall)>,
     /// Optional `ORDER BY` columns.
     pub order_by: Vec<OrderBy>,
     /// Optional `ORDER BY cosine(emb, ?) LIMIT k` for vector top-k (legacy).
@@ -300,8 +436,18 @@ pub struct SelectStatement {
 pub struct CTE {
     /// The CTE name, usable as a table reference in the main query.
     pub name: String,
-    /// The CTE's defining query.
+    /// The CTE's defining query. For a recursive CTE (see `recursive_term`),
+    /// this is just the anchor (non-recursive) term.
     pub query: SelectStatement,
+    /// For `WITH RECURSIVE`: `Some((set_op, recursive_term))` when this CTE's
+    /// body has the shape `query <set_op> recursive_term`, where
+    /// `recursive_term` references this CTE by name in its own `FROM`/`JOIN`.
+    /// `None` for a plain (non-recursive) CTE — including a CTE inside a
+    /// `WITH RECURSIVE` clause that doesn't actually self-reference.
+    /// `set_op` is always `SetOperation::Union` (Postgres only allows
+    /// `UNION`/`UNION ALL` between a recursive CTE's anchor and recursive
+    /// term; `INTERSECT`/`EXCEPT` are rejected at parse time).
+    pub recursive_term: Option<(SetOperation, Box<SelectStatement>)>,
 }
 
 /// An `ORDER BY cosine(<col>, <param>) LIMIT k` clause (RAG/embedding top-k).
@@ -393,11 +539,41 @@ pub struct AlterTableStatement {
     pub op: AlterTableOp,
 }
 
+/// A set operation combining the results of two or more SELECT queries
+/// (UNION / INTERSECT / EXCEPT).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetOperation {
+    /// UNION [ALL]. The bool is true for ALL.
+    Union(bool),
+    /// INTERSECT
+    Intersect,
+    /// EXCEPT
+    Except,
+}
+
+/// A compound query: `SELECT ... { UNION | INTERSECT | EXCEPT } SELECT ...`
+/// with optional final ORDER BY / LIMIT. Each operand is a "select core":
+/// columns + FROM + JOINs + WHERE + GROUP BY + HAVING (no inner ORDER BY
+/// or LIMIT — those belong to the compound, not to individual operands).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompoundStatement {
+    /// The first (left-most) SELECT core.
+    pub first: Box<SelectStatement>,
+    /// Remaining set operations paired with their right-hand SELECT cores.
+    pub operations: Vec<(SetOperation, SelectStatement)>,
+    /// Optional ORDER BY applied to the entire compound result.
+    pub order_by: Vec<OrderBy>,
+    /// Optional LIMIT applied to the entire compound result.
+    pub limit: Option<u64>,
+}
+
 /// A fully parsed statement: any of the supported DML/DQL/DDL forms.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     /// A `SELECT` query.
     Select(SelectStatement),
+    /// A compound query: `SELECT ... UNION/INTERSECT/EXCEPT SELECT ...`.
+    Compound(CompoundStatement),
     /// An `INSERT` statement.
     Insert(InsertStatement),
     /// An `UPDATE` statement.
