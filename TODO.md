@@ -457,10 +457,17 @@ chain builds on it, matching the existing `out-archon-*` convention).
   wired into `docker-compose.yml` (`pgvector/pgvector:pg16`, `--locale=C`)
   and a non-blocking `pg-compat` CI job. Validates SQL semantics via the
   existing Rust API — no wire protocol involved yet.
-- [ ] **Slice 2** (after Track B lands B1-B4): point the same corpus at
+- [x] **Slice 2** (after Track B lands B1-B4): point the same corpus at
   `out-archon-pgwire` through a real `postgres` crate client instead of the
   Rust API, catching wire-encoding bugs (RowDescription OIDs, DataRow
   formatting, CommandComplete tags, SQLSTATEs) Slice 1 cannot see.
+  Implemented as `crates/out-archon-pgwire/tests/pgwire_slt.rs` — an integration
+  test that runs the same `.slt` corpus against a PostgreSQL wire endpoint
+  (real Postgres or `archon-pgwire` server) via the `postgres` crate. The test
+  is skipped unless `PGWIRE_SLT_TEST` env var is set; CI's `pg-compat` job
+  runs it against real Postgres, and a local developer can run it against
+  `cargo run --bin archon-pgwire` via the `#[ignore]` integration test
+  `pgwire_slt_integration`.
 - [ ] `docs/POSTGRES_COMPATIBILITY.md`, generated/maintained from the
   corpus's `divergent/` cases — the artifact that finally lets the §5.2/
   Phase 6 reconciliation items above close honestly instead of
