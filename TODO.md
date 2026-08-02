@@ -24,7 +24,7 @@ list (see `docs/0001-inside-out-architecture.md`).
 - [x] `.github/workflows/release.yml` (manual `workflow_dispatch` publish, one crate at a time)
 - [x] `docs/` ADR folder + ADR 0001 (inside-out rationale)
 - [x] `benches/`, `formal-proofs/` folder scaffolds
-- [ ] Create the actual `github.com/tpt-solutions/tpt-archon` remote and push (user action — not done by the agent)
+- [x] Create the actual `github.com/tpt-solutions/tpt-archon` remote and push (user action — not done by the agent)
 - [ ] Add `CARGO_REGISTRY_TOKEN` secret to the GitHub repo once ready to publish
 
 ---
