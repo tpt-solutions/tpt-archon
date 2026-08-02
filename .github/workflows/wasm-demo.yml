@@ -57,7 +57,7 @@ jobs:
           mkdir -p _site
           cp -r crates/out-archon-wasm/www/. _site/
           cp -r crates/out-archon-wasm/pkg _site/pkg
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
