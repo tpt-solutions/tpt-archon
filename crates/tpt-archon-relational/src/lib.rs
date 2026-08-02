@@ -18,3 +18,5 @@ pub mod vector_index;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
+
+pub use executor::{CommandTag, ResultSet};

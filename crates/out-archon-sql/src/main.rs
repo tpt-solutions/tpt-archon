@@ -219,6 +219,7 @@ fn print_result_set_table(columns: &[String], rows: &[Vec<Value>]) {
 fn display_value(val: &Value) -> String {
     match val {
         Value::Int(n) => n.to_string(),
+        Value::Float(f) => f.to_string(),
         Value::Text(s) => s.clone(),
         Value::Vector(v) => {
             let inner: Vec<String> = v.iter().map(|f| format!("{:.4}", f)).collect();
@@ -246,6 +247,9 @@ fn fmt_db_error(e: &DbError) -> String {
         DbError::RecursiveView(v) => format!("view '{v}' cannot reference itself"),
         DbError::Unsupported(m) => format!("unsupported: {m}"),
         DbError::SubqueryCardinality(m) => format!("subquery error: {m}"),
+        DbError::ColumnCountMismatch => {
+            "each UNION/INTERSECT/EXCEPT query must have the same number of columns".to_string()
+        }
         DbError::Exec(e) => format!("execution error: {e:?}"),
     }
 }
@@ -306,7 +310,14 @@ fn handle_dot_command(db: &mut Database, mode: &mut OutputMode, cmd: &str) {
                     for (col, ty) in schema.columns.iter().zip(&schema.types) {
                         let ty_str = match ty {
                             tpt_archon_relational::database::ColumnType::Int => "INT",
+                            tpt_archon_relational::database::ColumnType::Boolean => "BOOLEAN",
+                            tpt_archon_relational::database::ColumnType::Float => "FLOAT",
+                            tpt_archon_relational::database::ColumnType::Double => "DOUBLE",
+                            tpt_archon_relational::database::ColumnType::Numeric => "NUMERIC",
                             tpt_archon_relational::database::ColumnType::Text => "TEXT",
+                            tpt_archon_relational::database::ColumnType::Varchar(_) => "VARCHAR",
+                            tpt_archon_relational::database::ColumnType::Date => "DATE",
+                            tpt_archon_relational::database::ColumnType::Timestamp => "TIMESTAMP",
                             tpt_archon_relational::database::ColumnType::Vector => "VECTOR",
                         };
                         println!("  {col} {ty_str}");

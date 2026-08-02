@@ -1,0 +1,62 @@
+# EXTRACT date/time function tests
+# Dates are stored as days-since-epoch integers.
+# 2024-06-15 ≈ 19889 days since epoch
+# 2024-03-15 ≈ 19797 days since epoch
+# 2024-01-01 ≈ 19723 days since epoch
+
+statement ok
+CREATE TABLE events (id INT, happened DATE)
+
+statement ok
+INSERT INTO events (id, happened) VALUES (1, 19889)
+
+statement ok
+INSERT INTO events (id, happened) VALUES (2, 19797)
+
+statement ok
+INSERT INTO events (id, happened) VALUES (3, 19723)
+
+# EXTRACT YEAR
+query I
+SELECT id FROM events WHERE EXTRACT(YEAR FROM happened) = 2024 ORDER BY id
+----
+1
+2
+3
+
+# EXTRACT MONTH
+query I
+SELECT id FROM events WHERE EXTRACT(MONTH FROM happened) = 6 ORDER BY id
+----
+1
+
+query I
+SELECT id FROM events WHERE EXTRACT(MONTH FROM happened) >= 4 ORDER BY id
+----
+1
+
+# EXTRACT DAY
+query I
+SELECT id FROM events WHERE EXTRACT(DAY FROM happened) = 1 ORDER BY id
+----
+3
+
+# EXTRACT with IS NULL on nullable column
+statement ok
+CREATE TABLE nullable_dates (id INT, d DATE)
+
+statement ok
+INSERT INTO nullable_dates (id, d) VALUES (1, NULL)
+
+statement ok
+INSERT INTO nullable_dates (id, d) VALUES (2, 19723)
+
+query I
+SELECT id FROM nullable_dates WHERE EXTRACT(YEAR FROM d) IS NULL ORDER BY id
+----
+1
+
+query I
+SELECT id FROM nullable_dates WHERE EXTRACT(YEAR FROM d) IS NOT NULL ORDER BY id
+----
+2

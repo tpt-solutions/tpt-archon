@@ -22,18 +22,24 @@ CREATE TABLE g2 (v INT)
 statement error expected FROM
 SELECT v
 
-# --- Fact #4: only INNER JOIN exists (as either `JOIN` or `INNER JOIN`) -
+# --- Fact #4 (resolved): LEFT/RIGHT/FULL/CROSS JOIN now exist -------------
 #
-# `JoinType` has a single `Inner` variant, and the parser's join loop only
-# recognizes the bare keyword `join` (matching either spelling by ignoring
-# whether the user also wrote `INNER` first via a separate path — but LEFT/
-# RIGHT/FULL/CROSS are simply unrecognized keywords to this grammar, not
-# rejected joins). Postgres accepts all five join forms.
-statement error trailing tokens
-SELECT v FROM g1 LEFT JOIN g2 ON v = v
+# LEFT, RIGHT, FULL, and CROSS JOIN are now supported (Track A3).
+statement ok
+INSERT INTO g1 (v) VALUES (1)
 
-statement error trailing tokens
+statement ok
+INSERT INTO g2 (v) VALUES (1)
+
+query I
+SELECT v FROM g1 LEFT JOIN g2 ON v = v
+----
+1
+
+query I
 SELECT v FROM g1 CROSS JOIN g2
+----
+1
 
 # --- Fact #7: single-row INSERT only ------------------------------------
 #

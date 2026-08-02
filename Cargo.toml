@@ -7,6 +7,7 @@ members = [
     "crates/tpt-archon-relational",
     "crates/out-archon-sql",
     "crates/out-archon-wasm",
+    "crates/out-archon-pgwire",
 ]
 # Benchmarks live in their own crate so Criterion is only built when explicitly
 # running `cargo bench` from `benches/`, keeping the main workspace lean.
@@ -74,6 +75,7 @@ exclude = [
     "crates/out-archon-py",
     "crates/out-archon-node",
     "crates/out-archon-pgcompat",
+    "crates/out-archon-pgwire",
 ]
 
 [workspace.package]

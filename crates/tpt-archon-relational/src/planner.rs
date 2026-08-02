@@ -163,7 +163,9 @@ fn selectivity(expr: &Expr) -> (u64, u64) {
         // Subqueries are evaluated at the database level; default estimate.
         Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::ScalarCmp { .. } => (1, 3),
         // Aggregate expressions are resolved after GROUP BY; default estimate.
-        Expr::Agg { .. } => (1, 3),
+        Expr::Agg { .. } | Expr::AggCmp { .. } => (1, 3),
+        // EXTRACT is a scalar projection, not a selective predicate; default estimate.
+        Expr::ExtractCmp { .. } => (1, 3),
     }
 }
 

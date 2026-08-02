@@ -5,7 +5,7 @@ AI-native relational query engine running on the lower `tpt-archon` layers.
 
 ## Modules
 
-- [`parser`](src/parser.rs) — a hand-written, allocation-light recursive-descent
+- [`parser`](src/parser/mod.rs) — a hand-written, allocation-light recursive-descent
   parser for a PostgreSQL-leaning SQL dialect: `SELECT` (`WHERE` with
   `AND`/`OR`/`NOT`, `BETWEEN`, `IN`, `LIKE`, `IS [NOT] NULL`, subqueries),
   `JOIN`, `GROUP BY`/`HAVING`, `ORDER BY`, CTEs (`WITH`, including

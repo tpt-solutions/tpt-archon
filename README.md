@@ -9,10 +9,15 @@ design document.
 
 ## Status
 
-Early but functional across all four crates: each phase's core functionality is
-implemented and tested. External verification crates (`tpt-eidos-verifier`,
-`tpt-telos-*`, `tpt-gpu-ir-spec`) are wired in via the non-published
-`crates/out-archon-verify` harness, not the shippable crates. GPU support is
+Early but functional across all four layered crates: each phase's core
+functionality is implemented and tested. A real PostgreSQL wire-protocol
+server (`out-archon-pgwire`) sits on top of `tpt-archon-relational`, so any
+Postgres client — `psql`, drivers, ORMs — can talk to Archon directly (see
+[Connect with a Postgres client](#connect-with-a-postgres-client) below);
+its wire-level behavior is checked against real Postgres by a comparison
+suite (`out-archon-pgcompat`, Phase 8 Track C). External verification crates
+(`tpt-eidos-verifier`, `tpt-telos-*`, `tpt-gpu-ir-spec`) are wired in via the
+non-published `crates/out-archon-verify` harness, not the shippable crates. GPU support is
 IR-emission only (no runtime). A real Linux `io_uring` backend exists behind
 an opt-in feature (`tpt-archon-kernel`'s `io-uring-backend`), and a real,
 cross-platform, read-only `mmap` zero-copy path exists behind another
@@ -105,6 +110,29 @@ docker run -it archon-sql
 `ghcr.io/<org>/<repo>/archon-sql` on every `v*` release tag (and remains
 available via manual dispatch for an ad hoc build in between releases).
 
+### Connect with a Postgres client
+
+Archon also speaks the real PostgreSQL wire protocol, so any Postgres
+client can connect to it directly instead of going through the `archon-sql`
+REPL. Start the server:
+
+```sh
+cargo run -p out-archon-pgwire --bin archon-pgwire
+```
+
+This listens on `127.0.0.1:5432` by default (override with the `HOST`/`PORT`
+env vars) and accepts unauthenticated (`trust`) connections. Then, from
+another terminal:
+
+```sh
+psql -h 127.0.0.1 -p 5432 -U postgres
+```
+
+Coverage is still narrower than real Postgres — see [`TODO.md`](TODO.md)'s
+Phase 8 for what's supported (simple + extended query protocol, SQLSTATE
+errors, transactions) versus deferred (SCRAM auth, `COPY`, TLS, `pg_catalog`
+emulation).
+
 **Which crate should I use?**
 
 | What you want | Crate | Example |
@@ -112,6 +140,7 @@ available via manual dispatch for an ad hoc build in between releases).
 | Embed a database in your app | `tpt-archon-relational` | [`examples/select_end_to_end.rs`](crates/tpt-archon-relational/examples/select_end_to_end.rs) |
 | Use the storage engine directly | `tpt-archon-core` | [`examples/storage_tour.rs`](crates/tpt-archon-core/examples/storage_tour.rs) |
 | Run SQL interactively | `archon-sql` (package `out-archon-sql`, not published) | `cargo run -p out-archon-sql` |
+| Connect via `psql`/Postgres drivers | `archon-pgwire` (package `out-archon-pgwire`, not published) | `cargo run -p out-archon-pgwire --bin archon-pgwire` |
 | Try it in a browser, no install | `out-archon-wasm` (not published) | [`crates/out-archon-wasm/www/`](crates/out-archon-wasm/www/) — see that crate's README to build/serve it |
 | Use Archon from Python | `archon-db` (package `out-archon-py`, PyO3 bindings, not yet on PyPI) | [`crates/out-archon-py/README.md`](crates/out-archon-py/README.md) |
 | Embed the database from Node.js | `archon-node` (crate `out-archon-node`, not published to crates.io -- ships to npm) | [`crates/out-archon-node/README.md`](crates/out-archon-node/README.md) |

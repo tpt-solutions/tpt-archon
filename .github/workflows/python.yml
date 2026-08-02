@@ -33,7 +33,7 @@ jobs:
     # `cargo build --workspace` runner can link. This job is where it
     # actually gets built and exercised.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

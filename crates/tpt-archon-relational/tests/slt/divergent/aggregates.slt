@@ -80,6 +80,9 @@ SELECT dept, COUNT(*) AS cnt FROM div_employees GROUP BY dept HAVING cnt >= 2
 ----
 eng 2
 
-# Archon: the raw-aggregate-expression form Postgres requires fails here.
-statement error UnknownColumn
+# Archon: the raw-aggregate-expression form Postgres requires now works here
+# because resolve_having_aliases rewrites COUNT(*) to the explicit alias 'cnt'.
+query TI
 SELECT dept, COUNT(*) AS cnt FROM div_employees GROUP BY dept HAVING COUNT(*) >= 2
+----
+eng 2

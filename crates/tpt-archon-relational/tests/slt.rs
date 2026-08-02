@@ -209,6 +209,7 @@ fn parse_directives(text: &str) -> Vec<Directive> {
 fn display_value(v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
+        Value::Float(f) => f.to_string(),
         Value::Text(s) => s.clone(),
         Value::Null => "NULL".to_string(),
         Value::Vector(v) => {

@@ -91,6 +91,7 @@ impl Default for ArchonDb {
 fn value_to_json(v: &Value) -> serde_json::Value {
     match v {
         Value::Int(i) => serde_json::json!(i),
+        Value::Float(f) => serde_json::json!(f),
         Value::Text(s) => serde_json::json!(s),
         Value::Vector(vec) => serde_json::json!(vec),
         Value::Null => serde_json::Value::Null,
@@ -133,6 +134,9 @@ fn fmt_db_error(e: &DbError) -> String {
         DbError::RecursiveView(v) => format!("view '{v}' cannot reference itself"),
         DbError::Unsupported(m) => format!("unsupported: {m}"),
         DbError::SubqueryCardinality(m) => format!("subquery error: {m}"),
+        DbError::ColumnCountMismatch => {
+            "each UNION/INTERSECT/EXCEPT query must have the same number of columns".to_string()
+        }
         DbError::Exec(e) => format!("execution error: {e:?}"),
     }
 }
