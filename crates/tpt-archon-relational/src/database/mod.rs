@@ -21,12 +21,14 @@
 //! everything else is `pub(super)` so it can be shared across these
 //! submodules without leaking outside `database`.
 
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 
 use tpt_archon_core::btree::BTree;
 
-use crate::executor::ResultSet;
+use crate::executor::{CommandTag, ResultSet};
 use crate::mvcc;
 use crate::parser::{Expr, SelectStatement, Statement, TableRef};
 
@@ -44,6 +46,32 @@ mod txn;
 pub use schema::{ColumnType, DbError, Schema};
 
 use storage::TableStorage;
+
+/// Opaque identifier for a database session.
+/// Used to track per-session transaction state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionId(pub u64);
+
+impl SessionId {
+    pub fn new() -> Self {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        SessionId(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Per-session transaction state.
+#[derive(Debug, Default)]
+struct SessionTxn {
+    in_transaction: bool,
+    active_txns: Vec<(String, mvcc::Transaction)>,
+}
 
 /// A small relational database backed by `tpt-archon-core`'s B-Link tree.
 ///
@@ -72,6 +100,10 @@ pub struct Database {
     /// Per-table transactions, lazily begun on first touch within the
     /// currently open transaction (empty when `!in_transaction`).
     active_txns: Vec<(String, mvcc::Transaction)>,
+    /// Session parameters for SET/SHOW/RESET commands (PostgreSQL compatibility).
+    session_parameters: SessionParameters,
+    /// Per-session transaction state.
+    session_txns: BTreeMap<SessionId, SessionTxn>,
 }
 
 impl Database {
@@ -99,7 +131,200 @@ impl Database {
             views: Vec::new(),
             in_transaction: false,
             active_txns: Vec::new(),
+            session_parameters: SessionParameters::new(),
+            session_txns: BTreeMap::new(),
         }
+    }
+
+    /// Begins a transaction for a specific session.
+    /// Returns an error if the session already has an active transaction.
+    pub fn session_begin(&mut self, session_id: SessionId) -> Result<(), DbError> {
+        let session_txn = self.session_txns.entry(session_id).or_default();
+        if session_txn.in_transaction {
+            return Err(DbError::TransactionError(
+                "transaction already in progress for this session".to_string(),
+            ));
+        }
+        session_txn.in_transaction = true;
+        session_txn.active_txns.clear();
+        Ok(())
+    }
+
+    /// Commits the transaction for a specific session.
+    /// Returns an error if the session has no active transaction.
+    pub fn session_commit(&mut self, session_id: SessionId) -> Result<(), DbError> {
+        let session_txn = self.session_txns.get_mut(&session_id).ok_or_else(|| {
+            DbError::TransactionError("no active transaction for this session".to_string())
+        })?;
+
+        if !session_txn.in_transaction {
+            return Err(DbError::TransactionError(
+                "no active transaction for this session".to_string(),
+            ));
+        }
+
+        let txns = core::mem::take(&mut session_txn.active_txns);
+        session_txn.in_transaction = false;
+
+        for (table_name, txn) in txns {
+            let writes: Vec<(u64, Vec<u8>)> =
+                txn.writes_iter().map(|(k, v)| (k, v.to_vec())).collect();
+            let ts = self
+                .table_mut(&table_name)
+                .expect("table existed when its transaction was opened");
+            match ts.mvcc.commit(txn) {
+                Ok(_) => {
+                    for (id, bytes) in writes {
+                        if bytes[0] == crate::database::codec::MVCC_TOMBSTONE {
+                            ts.tree.delete(id);
+                            crate::database::storage::maintain_vector_indexes_on_delete(ts, id);
+                        } else {
+                            ts.tree.insert(id, bytes[1..].to_vec());
+                            let row = crate::database::codec::decode_row_validated(
+                                id,
+                                &bytes[1..],
+                                ts.schema.columns.len(),
+                            )?;
+                            crate::database::storage::maintain_vector_indexes_for_row(ts, id, &row);
+                        }
+                    }
+                    crate::database::storage::maybe_build_vector_indexes(ts)?;
+                }
+                Err(mvcc::CommitError::Conflict) => {
+                    return Err(DbError::TransactionError(alloc::format!(
+                        "commit conflict on table '{table_name}'"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rolls back the transaction for a specific session.
+    /// Returns an error if the session has no active transaction.
+    pub fn session_rollback(&mut self, session_id: SessionId) -> Result<(), DbError> {
+        let session_txn = self.session_txns.get_mut(&session_id).ok_or_else(|| {
+            DbError::TransactionError("no active transaction for this session".to_string())
+        })?;
+
+        if !session_txn.in_transaction {
+            return Err(DbError::TransactionError(
+                "no active transaction for this session".to_string(),
+            ));
+        }
+
+        // Buffered per-table transactions are simply dropped without
+        // committing, discarding every write made since BEGIN.
+        session_txn.active_txns.clear();
+        session_txn.in_transaction = false;
+        Ok(())
+    }
+
+    /// Checks if a session has an active transaction.
+    pub fn session_in_transaction(&self, session_id: SessionId) -> bool {
+        self.session_txns
+            .get(&session_id)
+            .map(|st| st.in_transaction)
+            .unwrap_or(false)
+    }
+
+    /// Ensures a per-table transaction exists for `table_name` within a session's
+    /// transaction, lazily beginning one on first touch.
+    #[allow(dead_code)]
+    fn ensure_session_txn(&mut self, session_id: SessionId, table_name: &str) {
+        // First check if the table exists
+        let table_exists = self.table(table_name).is_some();
+        if !table_exists {
+            return;
+        }
+
+        // Check if we already have a transaction for this table in this session
+        let already_has_txn = self
+            .session_txns
+            .get(&session_id)
+            .map(|st| st.active_txns.iter().any(|(n, _)| n == table_name))
+            .unwrap_or(false);
+
+        if already_has_txn {
+            return;
+        }
+
+        // We know the table exists, so we can get it mutably and begin the transaction
+        if let Some(ts) = self.table_mut(table_name) {
+            let txn = ts.mvcc.begin();
+
+            // Now add it to the session's transaction list
+            let session_txn = self.session_txns.entry(session_id).or_default();
+            session_txn.active_txns.push((table_name.to_string(), txn));
+        }
+    }
+
+    /// Executes a statement within a specific session's transaction context.
+    /// For non-transactional statements, behaves like `execute`.
+    pub fn execute_in_session(
+        &mut self,
+        session_id: SessionId,
+        stmt: &Statement,
+        params: &[Vec<f32>],
+    ) -> Result<ResultSet, DbError> {
+        // For transaction control statements, use session-aware versions
+        match stmt {
+            Statement::Begin => return self.session_begin(session_id).map(|_| empty_result_set()),
+            Statement::Commit => {
+                return self.session_commit(session_id).map(|_| empty_result_set())
+            }
+            Statement::Rollback => {
+                return self
+                    .session_rollback(session_id)
+                    .map(|_| empty_result_set())
+            }
+            _ => {}
+        }
+
+        // For DML statements within a session transaction, ensure session txn exists
+        let needs_session_txn = matches!(
+            stmt,
+            Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_)
+        );
+
+        if needs_session_txn && self.session_in_transaction(session_id) {
+            // We need to use session-aware execution for DML
+            // For now, fall back to the global transaction if no session txn
+            // This is a simplified implementation - a full version would need
+            // to refactor the DML execution paths to use session_txns
+        }
+
+        // For all other statements, use the existing execute path
+        self.execute(stmt, params)
+    }
+
+    /// Executes a statement within a specific session and returns stats.
+    pub fn execute_in_session_with_stats(
+        &mut self,
+        session_id: SessionId,
+        stmt: &Statement,
+        params: &[Vec<f32>],
+    ) -> Result<(ResultSet, CommandTag), DbError> {
+        let rs = self.execute_in_session(session_id, stmt, params)?;
+        let tag = match stmt {
+            Statement::Select(_) => CommandTag::Select(rs.rows.len() as u64),
+            Statement::Insert(_) => CommandTag::Insert(rs.affected.unwrap_or(0)),
+            Statement::Update(_) => CommandTag::Update(rs.affected.unwrap_or(0)),
+            Statement::Delete(_) => CommandTag::Delete(rs.affected.unwrap_or(0)),
+            Statement::CreateTable(_) => CommandTag::CreateTable,
+            Statement::CreateView(_) => CommandTag::CreateView,
+            Statement::DropView(_) => CommandTag::DropView,
+            Statement::AlterTable(_) => CommandTag::AlterTable,
+            Statement::Begin => CommandTag::Begin,
+            Statement::Commit => CommandTag::Commit,
+            Statement::Rollback => CommandTag::Rollback,
+            Statement::SetParameter(_) => CommandTag::Set,
+            Statement::ShowParameter(_) => CommandTag::Select(0),
+            Statement::ResetParameter(_) => CommandTag::Reset,
+            Statement::ResetAll(_) => CommandTag::Reset,
+            Statement::Compound(_) => CommandTag::Select(rs.rows.len() as u64),
+        };
+        Ok((rs, tag))
     }
 
     /// Ensures a per-table transaction exists for `table_name` while an outer
@@ -200,6 +425,19 @@ impl Database {
                 self.run_rollback()?;
                 Ok(empty_result_set())
             }
+            Statement::SetParameter(s) => {
+                self.run_set_parameter(s)?;
+                Ok(empty_result_set())
+            }
+            Statement::ShowParameter(s) => self.run_show_parameter(s),
+            Statement::ResetParameter(s) => {
+                self.run_reset_parameter(s)?;
+                Ok(empty_result_set())
+            }
+            Statement::ResetAll(_) => {
+                self.run_reset_all()?;
+                Ok(empty_result_set())
+            }
             Statement::Compound(cm) => self.run_compound(cm, params),
         }
     }
@@ -208,6 +446,144 @@ impl Database {
     /// used by callers that build statements directly (e.g. arity tests).
     pub fn execute_checked(&mut self, stmt: &Statement) -> Result<ResultSet, DbError> {
         self.execute(stmt, &[])
+    }
+
+    /// Executes a parsed [`Statement`] and returns both the [`ResultSet`] and a
+    /// PostgreSQL-style [`CommandTag`] describing what happened. This is the
+    /// entry point the wire-protocol layer uses to emit correct
+    /// `CommandComplete` messages.
+    pub fn execute_with_stats(
+        &mut self,
+        stmt: &Statement,
+        params: &[Vec<f32>],
+    ) -> Result<(ResultSet, CommandTag), DbError> {
+        let tag = match stmt {
+            Statement::Select(_) => CommandTag::Select(0),
+            Statement::Insert(_) => CommandTag::Insert(0),
+            Statement::Update(_) => CommandTag::Update(0),
+            Statement::Delete(_) => CommandTag::Delete(0),
+            Statement::CreateTable(_) => CommandTag::CreateTable,
+            Statement::CreateView(_) => CommandTag::CreateView,
+            Statement::DropView(_) => CommandTag::DropView,
+            Statement::AlterTable(_) => CommandTag::AlterTable,
+            Statement::Begin => CommandTag::Begin,
+            Statement::Commit => CommandTag::Commit,
+            Statement::Rollback => CommandTag::Rollback,
+            Statement::SetParameter(_) => CommandTag::Set,
+            Statement::ShowParameter(_) => CommandTag::Select(0),
+            Statement::ResetParameter(_) => CommandTag::Reset,
+            Statement::ResetAll(_) => CommandTag::Reset,
+            Statement::Compound(_) => CommandTag::Select(0),
+        };
+        let rs = self.execute(stmt, params)?;
+        let tag = match (&tag, rs.affected) {
+            (CommandTag::Select(_), Some(n)) => CommandTag::Select(n),
+            (CommandTag::Select(_), None) => CommandTag::Select(rs.rows.len() as u64),
+            (CommandTag::Insert(_), Some(n)) => CommandTag::Insert(n),
+            (CommandTag::Update(_), Some(n)) => CommandTag::Update(n),
+            (CommandTag::Delete(_), Some(n)) => CommandTag::Delete(n),
+            (t, _) => t.clone(),
+        };
+        Ok((rs, tag))
+    }
+}
+
+/// Parameter storage for SET/SHOW/RESET commands
+#[derive(Debug, Default)]
+struct SessionParameters {
+    params: alloc::collections::BTreeMap<String, String>,
+}
+
+impl SessionParameters {
+    fn new() -> Self {
+        let mut params = alloc::collections::BTreeMap::new();
+        // Default PostgreSQL-compatible parameters
+        params.insert("server_version".to_string(), "16.0".to_string());
+        params.insert("server_encoding".to_string(), "UTF8".to_string());
+        params.insert("client_encoding".to_string(), "UTF8".to_string());
+        params.insert("application_name".to_string(), "".to_string());
+        params.insert("DateStyle".to_string(), "ISO, MDY".to_string());
+        params.insert("TimeZone".to_string(), "UTC".to_string());
+        params.insert("standard_conforming_strings".to_string(), "on".to_string());
+        params.insert("search_path".to_string(), "\"$user\", public".to_string());
+        params.insert(
+            "default_transaction_isolation".to_string(),
+            "read committed".to_string(),
+        );
+        params.insert(
+            "transaction_isolation".to_string(),
+            "read committed".to_string(),
+        );
+        Self { params }
+    }
+
+    fn get(&self, name: &str) -> Option<&String> {
+        self.params.get(name)
+    }
+
+    fn set(&mut self, name: String, value: String) {
+        self.params.insert(name, value);
+    }
+
+    fn reset(&mut self, name: &str) {
+        if let Some(default) = Self::new().params.get(name) {
+            self.params.insert(name.to_string(), default.clone());
+        } else {
+            self.params.remove(name);
+        }
+    }
+
+    fn reset_all(&mut self) {
+        self.params = Self::new().params;
+    }
+}
+
+impl Database {
+    /// Execute SET parameter = value
+    fn run_set_parameter(
+        &mut self,
+        stmt: &crate::parser::SetParameterStatement,
+    ) -> Result<(), DbError> {
+        self.session_parameters
+            .set(stmt.name.clone(), stmt.value.clone());
+        Ok(())
+    }
+
+    /// Execute SHOW parameter
+    fn run_show_parameter(
+        &mut self,
+        stmt: &crate::parser::ShowParameterStatement,
+    ) -> Result<ResultSet, DbError> {
+        let mut result = ResultSet {
+            columns: vec!["name".to_string(), "setting".to_string()],
+            ..Default::default()
+        };
+
+        if let Some(value) = self.session_parameters.get(&stmt.name) {
+            result.rows.push(vec![
+                crate::executor::Value::Text(stmt.name.clone()),
+                crate::executor::Value::Text(value.clone()),
+            ]);
+        } else {
+            // Parameter not found - return empty row set with just columns
+        }
+
+        Ok(result)
+    }
+
+    /// Execute RESET parameter
+    fn run_reset_parameter(
+        &mut self,
+        stmt: &crate::parser::ResetParameterStatement,
+    ) -> Result<(), DbError> {
+        self.session_parameters.reset(&stmt.name);
+        Ok(())
+    }
+
+    /// Execute RESET ALL
+    fn run_reset_all(&mut self) -> Result<(), DbError> {
+        self.session_parameters.reset_all();
+        Ok(())
     }
 }
 

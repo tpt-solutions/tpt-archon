@@ -116,6 +116,59 @@ pub struct ResultSet {
     pub affected: Option<u64>,
 }
 
+/// A PostgreSQL-style command-completion tag, pairing the tag string with the
+/// row-count for DML statements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandTag {
+    Select(u64),
+    Insert(u64),
+    Update(u64),
+    Delete(u64),
+    CreateTable,
+    CreateView,
+    DropView,
+    AlterTable,
+    Begin,
+    Commit,
+    Rollback,
+    Set,
+    Reset,
+    Empty,
+}
+
+impl CommandTag {
+    /// Returns the tag string as PostgreSQL emits it in `CommandComplete`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CommandTag::Select(_) => "SELECT",
+            CommandTag::Insert(_) => "INSERT",
+            CommandTag::Update(_) => "UPDATE",
+            CommandTag::Delete(_) => "DELETE",
+            CommandTag::CreateTable => "CREATE TABLE",
+            CommandTag::CreateView => "CREATE VIEW",
+            CommandTag::DropView => "DROP VIEW",
+            CommandTag::AlterTable => "ALTER TABLE",
+            CommandTag::Begin => "BEGIN",
+            CommandTag::Commit => "COMMIT",
+            CommandTag::Rollback => "ROLLBACK",
+            CommandTag::Set => "SET",
+            CommandTag::Reset => "RESET",
+            CommandTag::Empty => "",
+        }
+    }
+
+    /// Returns the row-count suffix for DML tags, or `None` for DDL/txn tags.
+    pub fn row_count(&self) -> Option<u64> {
+        match self {
+            CommandTag::Select(n)
+            | CommandTag::Insert(n)
+            | CommandTag::Update(n)
+            | CommandTag::Delete(n) => Some(*n),
+            _ => None,
+        }
+    }
+}
+
 /// Converts a parser-level [`Literal`] into a runtime [`Value`].
 pub fn literal_to_value(lit: &Literal) -> Value {
     match lit {

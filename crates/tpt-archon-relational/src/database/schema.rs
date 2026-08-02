@@ -3,6 +3,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt;
 
 use crate::executor;
 use crate::parser;
@@ -83,3 +84,30 @@ impl From<executor::ExecError> for DbError {
         }
     }
 }
+
+impl fmt::Display for DbError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DbError::UnknownColumn(c) => write!(f, "unknown column: {}", c),
+            DbError::TypeMismatch => write!(f, "type mismatch"),
+            DbError::ColumnTypeMismatch(c) => write!(f, "column type mismatch: {}", c),
+            DbError::ArityMismatch => write!(f, "arity mismatch"),
+            DbError::NotAVectorColumn(c) => write!(f, "not a vector column: {}", c),
+            DbError::MissingParam => write!(f, "missing parameter"),
+            DbError::RowNotFound(id) => write!(f, "row not found: {}", id),
+            DbError::CorruptRow(id) => write!(f, "corrupt row: {}", id),
+            DbError::UnknownTable(t) => write!(f, "unknown table: {}", t),
+            DbError::TransactionError(msg) => write!(f, "transaction error: {}", msg),
+            DbError::TableAlreadyExists(t) => write!(f, "table already exists: {}", t),
+            DbError::ViewAlreadyExists(v) => write!(f, "view already exists: {}", v),
+            DbError::UnknownView(v) => write!(f, "unknown view: {}", v),
+            DbError::RecursiveView(v) => write!(f, "recursive view: {}", v),
+            DbError::Unsupported(msg) => write!(f, "unsupported: {}", msg),
+            DbError::ColumnCountMismatch => write!(f, "column count mismatch"),
+            DbError::SubqueryCardinality(msg) => write!(f, "subquery cardinality: {}", msg),
+            DbError::Exec(e) => write!(f, "execution error: {:?}", e),
+        }
+    }
+}
+
+impl core::error::Error for DbError {}

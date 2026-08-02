@@ -1,6 +1,7 @@
 //! `SELECT` execution, including vector top-k (`ORDER BY cosine(...)`).
 
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::executor::{self, Value};

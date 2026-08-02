@@ -1,7 +1,7 @@
 //! Correlated-subquery detection and the uncorrelated-subquery result cache
 //! used by `WHERE`/`HAVING` evaluation.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::executor::{self, Value};

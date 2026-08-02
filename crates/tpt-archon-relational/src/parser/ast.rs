@@ -567,6 +567,33 @@ pub struct CompoundStatement {
     pub limit: Option<u64>,
 }
 
+/// A parsed `SET parameter = value` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetParameterStatement {
+    /// Parameter name.
+    pub name: String,
+    /// Parameter value (as string, uninterpreted).
+    pub value: String,
+}
+
+/// A parsed `SHOW parameter` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowParameterStatement {
+    /// Parameter name.
+    pub name: String,
+}
+
+/// A parsed `RESET parameter` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetParameterStatement {
+    /// Parameter name.
+    pub name: String,
+}
+
+/// A parsed `RESET ALL` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetAllStatement;
+
 /// A fully parsed statement: any of the supported DML/DQL/DDL forms.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -594,6 +621,14 @@ pub enum Statement {
     Commit,
     /// A `ROLLBACK` transaction statement.
     Rollback,
+    /// A `SET parameter = value` statement.
+    SetParameter(SetParameterStatement),
+    /// A `SHOW parameter` statement.
+    ShowParameter(ShowParameterStatement),
+    /// A `RESET parameter` statement.
+    ResetParameter(ResetParameterStatement),
+    /// A `RESET ALL` statement.
+    ResetAll(ResetAllStatement),
 }
 
 /// A parse error with a human-readable message.

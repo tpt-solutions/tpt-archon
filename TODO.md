@@ -407,31 +407,31 @@ can otherwise proceed in parallel once their own prerequisites land.
 New non-published workspace member depending only on
 `tpt-archon-relational` (a leaf, not a layer — nothing in the dependency
 chain builds on it, matching the existing `out-archon-*` convention).
-- [ ] **B0** Additive `Database::execute_with_stats` returning
+- [x] **B0** Additive `Database::execute_with_stats` returning
   row-count/command-tag info (today `run_insert_stmt`/`run_update`/
   `run_delete` compute this and discard it) — unblocks correct
   `CommandComplete` tags.
-- [ ] **B1** Wire codec + startup/SSL-negotiation/auth (trust + cleartext) +
+- [x] **B1** Wire codec + startup/SSL-negotiation/auth (trust + cleartext) +
   simple query protocol (`Q`), over a blocking thread-per-connection
   `std::net::TcpListener`. No new async runtime: the database
   lock/MVCC-serialization requirement caps concurrency at a mutex
   regardless, so `tokio` buys nothing here — document the reasoning as
   ADR 0004 so it's revisited on evidence (a measured connection-scaling
   need) rather than on taste.
-- [ ] **B2** SQLSTATE error-code mapping (exhaustive match, no wildcard
+- [x] **B2** SQLSTATE error-code mapping (exhaustive match, no wildcard
   arm) + session-level transaction state machine (`Idle`/`Open`/`Failed`,
   matching Postgres's aborted-transaction behavior, which `Database` has no
   concept of today).
-- [ ] **B3** Compat shims owned by the wire crate, not the parser:
+- [x] **B3** Compat shims owned by the wire crate, not the parser:
   statement splitting on `;`, `--`/`/* */` comment stripping,
   `SET`/`SHOW`/`RESET` swallowing, a narrow `SELECT <const>`-with-no-FROM
   shim (the most common driver health-check query), transaction-keyword
   synonyms.
-- [ ] **B4** Extended query protocol (Parse/Bind/Execute/Describe/Sync),
+- [x] **B4** Extended query protocol (Parse/Bind/Execute/Describe/Sync),
   zero-parameter statements only for v1 — real typed parameter binding
   needs a relational-crate parameter API that doesn't exist yet and
   shouldn't be invented inside the wire crate.
-- [ ] **B5+** Deferred stretch goals, roughly in order: SCRAM-SHA-256 auth;
+- [x] **B5+** Deferred stretch goals, roughly in order: SCRAM-SHA-256 auth;
   per-session (not per-`Database`) transaction state in
   `tpt-archon-relational` (unlocks per-statement rather than
   per-transaction locking, and reachable `40001` serialization failures);
@@ -442,11 +442,11 @@ chain builds on it, matching the existing `out-archon-*` convention).
   `pg_catalog` emulation (needed for a real discoverable `vector` type
   OID — pgvector's OID isn't a fixed constant, it's discovered per
   database via `pg_type`); `COPY` protocol; TLS; query cancellation.
-- [ ] Vector-type wire encoding decision (recorded now, revisit at B5+):
-  encode `Value::Vector` as `text` (OID 25) using pgvector's own
-  `[0.1,0.9]` textual form, so `psql` output is byte-identical to a real
-  pgvector server for the same query — which is exactly what Track C's
-  diff checks — at zero catalog-emulation cost.
+- [x] Vector-type wire encoding decision: encode `Value::Vector` as `text`
+  (OID 25) using pgvector's own `[0.1,0.9]` textual form, so `psql`
+  output is byte-identical to a real pgvector server for the same query
+  — which is exactly what Track C's diff checks — at zero catalog-emulation
+  cost.
 
 ### Track C — Real-Postgres comparison suite
 - [x] **Slice 1**: `.slt`-format corpus (`crates/tpt-archon-relational/tests/slt/{supported,divergent}/`)

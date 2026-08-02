@@ -121,11 +121,71 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
         Tok::Ident(kw) if eq_ignore_case(&kw, "begin") => Ok(Statement::Begin),
         Tok::Ident(kw) if eq_ignore_case(&kw, "commit") => Ok(Statement::Commit),
         Tok::Ident(kw) if eq_ignore_case(&kw, "rollback") => Ok(Statement::Rollback),
+        Tok::Ident(kw) if eq_ignore_case(&kw, "set") => {
+            parse_set(&mut ts).map(Statement::SetParameter)
+        }
+        Tok::Ident(kw) if eq_ignore_case(&kw, "show") => {
+            parse_show(&mut ts).map(Statement::ShowParameter)
+        }
+        Tok::Ident(kw) if eq_ignore_case(&kw, "reset") => parse_reset(&mut ts),
         _ => Err(ParseError(
             "expected SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, CREATE VIEW, DROP VIEW, \
-             ALTER TABLE, BEGIN, COMMIT, or ROLLBACK"
+             ALTER TABLE, BEGIN, COMMIT, ROLLBACK, SET, SHOW, or RESET"
                 .to_string(),
         )),
+    }
+}
+
+/// Parse `SET parameter = value`
+fn parse_set(ts: &mut TokenStream) -> Result<SetParameterStatement, ParseError> {
+    let name = expect_ident(ts, "parameter name")?;
+    expect_kw(ts, "=")?;
+    // Value can be an identifier, string, or number - read as raw token
+    let value = match ts.next() {
+        Tok::Ident(s) => s,
+        Tok::Text(s) => s,
+        Tok::Int(i) => i.to_string(),
+        Tok::Float(f) => f.to_string(),
+        _ => return Err(ParseError("expected parameter value after =".to_string())),
+    };
+    if !matches!(ts.next(), Tok::Eof) {
+        return Err(ParseError(
+            "trailing tokens after SET statement".to_string(),
+        ));
+    }
+    Ok(SetParameterStatement { name, value })
+}
+
+/// Parse `SHOW parameter`
+fn parse_show(ts: &mut TokenStream) -> Result<ShowParameterStatement, ParseError> {
+    let name = expect_ident(ts, "parameter name")?;
+    if !matches!(ts.next(), Tok::Eof) {
+        return Err(ParseError(
+            "trailing tokens after SHOW statement".to_string(),
+        ));
+    }
+    Ok(ShowParameterStatement { name })
+}
+
+/// Parse `RESET parameter` or `RESET ALL`
+fn parse_reset(ts: &mut TokenStream) -> Result<Statement, ParseError> {
+    match ts.peek() {
+        Tok::Ident(kw) if eq_ignore_case(&kw, "all") => {
+            ts.next(); // consume ALL
+            if !matches!(ts.next(), Tok::Eof) {
+                return Err(ParseError("trailing tokens after RESET ALL".to_string()));
+            }
+            Ok(Statement::ResetAll(ResetAllStatement))
+        }
+        _ => {
+            let name = expect_ident(ts, "parameter name")?;
+            if !matches!(ts.next(), Tok::Eof) {
+                return Err(ParseError(
+                    "trailing tokens after RESET statement".to_string(),
+                ));
+            }
+            Ok(Statement::ResetParameter(ResetParameterStatement { name }))
+        }
     }
 }
 

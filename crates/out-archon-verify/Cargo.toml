@@ -36,7 +36,7 @@ tpt-telos-parser = { git = "https://github.com/tpt-solutions/tpt-telos.git", pac
 tpt-gpu-ir-spec = { git = "https://github.com/tpt-solutions/tpt-gpu.git", package = "tpt-gpu-ir-spec", rev = "cb33993" }
 
 [dev-dependencies]
-tpt-archon-relational = { path = "../tpt-archon-relational", default-features = false }
+tpt-archon-relational = { path = "../tpt-archon-relational", default-features = false, features = ["std"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
