@@ -425,6 +425,9 @@ fn import_sqlite(db: &mut Database, path: &str, table_filter: Option<&str>) {
                     ColumnType::Int => "INT",
                     ColumnType::Text => "TEXT",
                     ColumnType::Vector => "VECTOR",
+                    // The SQLite type mapping above only ever produces Int or
+                    // Text, but ColumnType has more DDL-only variants.
+                    _ => "TEXT",
                 };
                 format!("{name} {ty_str}")
             })
@@ -469,6 +472,13 @@ fn import_sqlite(db: &mut Database, path: &str, table_filter: Option<&str>) {
                     ColumnType::Vector => {
                         values.push("NULL".to_string());
                     }
+                    // Unreachable in practice: the SQLite type mapping above
+                    // only ever produces Int or Text.
+                    _ => {
+                        let v: String = row.get(i).unwrap_or_default();
+                        let escaped = v.replace('\'', "''");
+                        values.push(format!("'{escaped}'"));
+                    }
                 }
             }
 
@@ -476,13 +486,10 @@ fn import_sqlite(db: &mut Database, path: &str, table_filter: Option<&str>) {
             let vals_str = values.join(", ");
             let insert_sql = format!("INSERT INTO {table_name} ({cols_str}) VALUES ({vals_str})");
 
-            match parse(&insert_sql) {
-                Ok(insert_stmt) => {
-                    if db.execute(&insert_stmt, &[]).is_ok() {
-                        imported += 1;
-                    }
+            if let Ok(insert_stmt) = parse(&insert_sql) {
+                if db.execute(&insert_stmt, &[]).is_ok() {
+                    imported += 1;
                 }
-                Err(_) => {}
             }
         }
 
