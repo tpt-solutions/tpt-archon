@@ -285,6 +285,22 @@ fn parse_primary_expr(ts: &mut TokenStream) -> Result<Expr, ParseError> {
                                 )),
                             }
                         }
+                        Tok::Ident(kw) if eq_ignore_case(&kw, "true") => {
+                            ts.next();
+                            Ok(Expr::Cmp {
+                                column: col_name,
+                                op,
+                                value: Literal::Bool(true),
+                            })
+                        }
+                        Tok::Ident(kw) if eq_ignore_case(&kw, "false") => {
+                            ts.next();
+                            Ok(Expr::Cmp {
+                                column: col_name,
+                                op,
+                                value: Literal::Bool(false),
+                            })
+                        }
                         Tok::Int(v) => {
                             ts.next();
                             Ok(Expr::Cmp {
@@ -392,6 +408,8 @@ pub(super) fn parse_literal(ts: &mut TokenStream) -> Result<Literal, ParseError>
         Tok::Text(s) => Ok(Literal::Text(s.to_string())),
         Tok::LBracket => parse_vector_literal(ts),
         Tok::Ident(kw) if eq_ignore_case(&kw, "null") => Ok(Literal::Null),
+        Tok::Ident(kw) if eq_ignore_case(&kw, "true") => Ok(Literal::Bool(true)),
+        Tok::Ident(kw) if eq_ignore_case(&kw, "false") => Ok(Literal::Bool(false)),
         _ => Err(ParseError("expected a value".to_string())),
     }
 }

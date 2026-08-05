@@ -211,6 +211,10 @@ fn display_value(v: &Value) -> String {
         Value::Int(n) => n.to_string(),
         Value::Float(f) => f.to_string(),
         Value::Text(s) => s.clone(),
+        // Matches Postgres's text-format boolean rendering ("t"/"f", not
+        // "true"/"false") so this runner's expected-row text stays
+        // byte-comparable with a real Postgres oracle (see out-archon-pgcompat).
+        Value::Bool(b) => (if *b { "t" } else { "f" }).to_string(),
         Value::Null => "NULL".to_string(),
         Value::Vector(v) => {
             // Not exercised by this corpus (see supported/ddl.slt's format

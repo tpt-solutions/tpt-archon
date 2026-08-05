@@ -42,3 +42,20 @@ claims; they describe what is implemented and what is tested.
   artifacts can be generated and linked.
 - Until proofs exist, no marketing correctness claim is made in any published
   crate metadata.
+
+## Update (2026-08-04)
+
+The Context section's premise that "neither `tpt-eidos` nor `tpt-telos` is
+available as a published crate today" is no longer true: `tpt-eidos-verifier`
+(0.2.0), `tpt-telos-verifier`/`tpt-telos-ir`/`tpt-telos-parser` (0.1.1), and
+`tpt-gpu-ir-spec` (0.1.0) are all published to crates.io as of late July/early
+August 2026. `crates/out-archon-verify`'s dependencies were switched from
+`git`+`rev` pins to ordinary version requirements, and the crate rejoined the
+default workspace (see `TODO.md` Phase 9) since the "crates.io rejects git
+deps" constraint that justified excluding it no longer applies.
+
+This does **not** change the Decision above: `tpt-telos` still has no Coq/Lean
+backend (its codegen targets Rust/Go), so the QF_LRA solver-checked assertion
+harnesses in `formal-proofs/` remain what's actually being produced, not a
+stepping stone that publication alone resolves. The publish status was never
+the load-bearing reason for this ADR's approach — it was one of two.

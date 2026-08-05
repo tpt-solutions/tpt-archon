@@ -93,6 +93,86 @@ fn parses_text_comparison() {
 }
 
 #[test]
+fn parses_true_false_literals_in_where() {
+    let s = parse_select("SELECT * FROM t WHERE active = TRUE").unwrap();
+    assert!(matches!(
+        s.filter,
+        Some(Expr::Cmp { ref column, value: Literal::Bool(true), .. })
+            if column == "active"
+    ));
+    let s = parse_select("SELECT * FROM t WHERE active = FALSE").unwrap();
+    assert!(matches!(
+        s.filter,
+        Some(Expr::Cmp { ref column, value: Literal::Bool(false), .. })
+            if column == "active"
+    ));
+}
+
+#[test]
+fn parses_doubled_quote_escape_in_text_literal() {
+    let s = parse_select("SELECT * FROM t WHERE name = 'It''s'").unwrap();
+    assert!(matches!(
+        s.filter,
+        Some(Expr::Cmp { ref column, value: Literal::Text(ref v), .. })
+            if column == "name" && v == "It's"
+    ));
+}
+
+#[test]
+fn parses_from_less_select_literal() {
+    let s = parse_statement("SELECT 1").unwrap();
+    assert_eq!(
+        s,
+        Statement::SelectLiteral(alloc::vec![SelectLiteralItem {
+            value: Literal::Int(1),
+            alias: None,
+        }])
+    );
+}
+
+#[test]
+fn parses_from_less_select_literal_with_alias_and_multiple_items() {
+    let s = parse_statement("SELECT 1 AS one, 'x' AS letter, TRUE").unwrap();
+    assert_eq!(
+        s,
+        Statement::SelectLiteral(alloc::vec![
+            SelectLiteralItem {
+                value: Literal::Int(1),
+                alias: Some("one".to_string()),
+            },
+            SelectLiteralItem {
+                value: Literal::Text("x".to_string()),
+                alias: Some("letter".to_string()),
+            },
+            SelectLiteralItem {
+                value: Literal::Bool(true),
+                alias: None,
+            },
+        ])
+    );
+}
+
+#[test]
+fn select_literal_does_not_swallow_real_from_select() {
+    // A leading literal followed by FROM must fall through to the normal
+    // column/table parser (which still rejects a bare literal as a column
+    // name — scalar expressions in a real table's SELECT list are a
+    // separate, still-unsupported gap), not be misparsed as a from-less
+    // literal select.
+    let s = parse_statement("SELECT 1 FROM t");
+    assert!(s.is_err());
+}
+
+#[test]
+fn bare_column_select_without_from_is_still_a_parse_error() {
+    // Only a literal-only projection list qualifies for the FROM-less path;
+    // a bare column reference still requires FROM (there's no table to
+    // resolve it against).
+    let s = parse_statement("SELECT v");
+    assert!(s.is_err());
+}
+
+#[test]
 fn parses_create_view() {
     let s = parse_statement("CREATE VIEW adults AS SELECT * FROM t WHERE age >= 18").unwrap();
     match s {
@@ -212,7 +292,20 @@ fn parses_begin_commit_rollback() {
 fn parses_insert_with_null() {
     let s = parse_statement("INSERT INTO t (id, name) VALUES (1, NULL)").unwrap();
     if let Statement::Insert(i) = s {
-        assert_eq!(i.values[1], Literal::Null);
+        assert_eq!(i.values[0][1], Literal::Null);
+    } else {
+        panic!("expected Insert");
+    }
+}
+
+#[test]
+fn parses_multi_row_insert() {
+    let s = parse_statement("INSERT INTO t (id, v) VALUES (1, 10), (2, 20), (3, 30)").unwrap();
+    if let Statement::Insert(i) = s {
+        assert_eq!(i.values.len(), 3);
+        assert_eq!(i.values[0], alloc::vec![Literal::Int(1), Literal::Int(10)]);
+        assert_eq!(i.values[1], alloc::vec![Literal::Int(2), Literal::Int(20)]);
+        assert_eq!(i.values[2], alloc::vec![Literal::Int(3), Literal::Int(30)]);
     } else {
         panic!("expected Insert");
     }

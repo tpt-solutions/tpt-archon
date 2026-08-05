@@ -132,6 +132,9 @@ impl Database {
 fn value_to_json(v: &CoreValue) -> JsonValue {
     match v {
         CoreValue::Int(i) => JsonValue::Number(Number::from(*i)),
+        CoreValue::Float(f) => Number::from_f64(*f as f64)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
         CoreValue::Text(s) => JsonValue::String(s.clone()),
         CoreValue::Vector(v) => JsonValue::Array(
             v.iter()
@@ -142,6 +145,7 @@ fn value_to_json(v: &CoreValue) -> JsonValue {
                 })
                 .collect(),
         ),
+        CoreValue::Bool(b) => JsonValue::Bool(*b),
         CoreValue::Null => JsonValue::Null,
     }
 }

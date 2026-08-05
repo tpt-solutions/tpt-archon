@@ -25,8 +25,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        # `out-archon-verify` is excluded from the default workspace, so this
-        # gate needs no network and stays green on a fresh/offline checkout.
         run: cargo test --workspace
       - name: Build tpt-archon-core (no_std, default features off)
         run: cargo build -p tpt-archon-core --no-default-features
@@ -37,29 +35,6 @@ jobs:
       # once those sibling crates are actually published there (see release.yml).
       - name: Verify crates.io packaging (dry run)
         run: cargo publish -p tpt-archon-core --dry-run --allow-dirty
-
-  verify:
-    name: Formal-verification harness (opt-in, network)
-    runs-on: ubuntu-latest
-    # This job fetches git-hosted ecosystem verifiers, so it needs network and
-    # runs separately from the offline shippable-crate gate above.
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Format (verify crate)
-        run: cargo fmt -p out-archon-verify -- --check
-      - name: Test verification harness
-        run: cargo test -p out-archon-verify
-        working-directory: crates/out-archon-verify
-      - name: Supply-chain audit (verify harness's git deps)
-        # The root `deny` job never sees this crate — it's excluded from the
-        # default workspace, so its git deps on the ecosystem verifiers were
-        # otherwise unscanned. Runs here since resolving them needs network.
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          manifest-path: crates/out-archon-verify/Cargo.toml
-          config: crates/out-archon-verify/deny.toml
 
   pg-compat:
     name: Postgres comparison harness (opt-in, stabilizing)
@@ -100,8 +75,7 @@ jobs:
       - name: Supply-chain audit (pgcompat crate's postgres/tokio-postgres deps)
         # The root `deny` job never sees this crate — it's excluded from the
         # default workspace (see root Cargo.toml), so its `postgres`/
-        # `tokio-postgres` dependency tree was otherwise unscanned. Mirrors
-        # the `verify` job's manifest-scoped pattern above, same reason.
+        # `tokio-postgres` dependency tree would otherwise go unscanned.
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           manifest-path: crates/out-archon-pgcompat/Cargo.toml

@@ -3,22 +3,26 @@
 # 2024-06-15 ≈ 19889 days since epoch
 # 2024-03-15 ≈ 19797 days since epoch
 # 2024-01-01 ≈ 19723 days since epoch
+#
+# Columns here use "eid"/"did" rather than "id" — see ddl.slt's format-
+# convention note: "id" is reserved for the implicit row-id column and
+# CREATE TABLE rejects a user column of that name outright.
 
 statement ok
-CREATE TABLE events (id INT, happened DATE)
+CREATE TABLE events (eid INT, happened DATE)
 
 statement ok
-INSERT INTO events (id, happened) VALUES (1, 19889)
+INSERT INTO events (eid, happened) VALUES (1, 19889)
 
 statement ok
-INSERT INTO events (id, happened) VALUES (2, 19797)
+INSERT INTO events (eid, happened) VALUES (2, 19797)
 
 statement ok
-INSERT INTO events (id, happened) VALUES (3, 19723)
+INSERT INTO events (eid, happened) VALUES (3, 19723)
 
 # EXTRACT YEAR
 query I
-SELECT id FROM events WHERE EXTRACT(YEAR FROM happened) = 2024 ORDER BY id
+SELECT eid FROM events WHERE EXTRACT(YEAR FROM happened) = 2024 ORDER BY eid
 ----
 1
 2
@@ -26,37 +30,37 @@ SELECT id FROM events WHERE EXTRACT(YEAR FROM happened) = 2024 ORDER BY id
 
 # EXTRACT MONTH
 query I
-SELECT id FROM events WHERE EXTRACT(MONTH FROM happened) = 6 ORDER BY id
+SELECT eid FROM events WHERE EXTRACT(MONTH FROM happened) = 6 ORDER BY eid
 ----
 1
 
 query I
-SELECT id FROM events WHERE EXTRACT(MONTH FROM happened) >= 4 ORDER BY id
+SELECT eid FROM events WHERE EXTRACT(MONTH FROM happened) >= 4 ORDER BY eid
 ----
 1
 
 # EXTRACT DAY
 query I
-SELECT id FROM events WHERE EXTRACT(DAY FROM happened) = 1 ORDER BY id
+SELECT eid FROM events WHERE EXTRACT(DAY FROM happened) = 1 ORDER BY eid
 ----
 3
 
 # EXTRACT with IS NULL on nullable column
 statement ok
-CREATE TABLE nullable_dates (id INT, d DATE)
+CREATE TABLE nullable_dates (did INT, d DATE)
 
 statement ok
-INSERT INTO nullable_dates (id, d) VALUES (1, NULL)
+INSERT INTO nullable_dates (did, d) VALUES (1, NULL)
 
 statement ok
-INSERT INTO nullable_dates (id, d) VALUES (2, 19723)
+INSERT INTO nullable_dates (did, d) VALUES (2, 19723)
 
 query I
-SELECT id FROM nullable_dates WHERE EXTRACT(YEAR FROM d) IS NULL ORDER BY id
+SELECT did FROM nullable_dates WHERE EXTRACT(YEAR FROM d) IS NULL ORDER BY did
 ----
 1
 
 query I
-SELECT id FROM nullable_dates WHERE EXTRACT(YEAR FROM d) IS NOT NULL ORDER BY id
+SELECT did FROM nullable_dates WHERE EXTRACT(YEAR FROM d) IS NOT NULL ORDER BY did
 ----
 2

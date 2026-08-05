@@ -239,6 +239,7 @@ fn type_oid_for_value(_val: &Value) -> i32 {
         Value::Float(_) => 701,
         Value::Text(_) => 25,
         Value::Vector(_) => 25, // pgvector's textual form [0.1,0.2,...] uses TEXT OID
+        Value::Bool(_) => 16,   // Postgres's real `boolean` OID
         Value::Null => 25,
     }
 }

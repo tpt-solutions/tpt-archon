@@ -45,7 +45,9 @@ pub use ast::*;
 use ddl::{parse_alter_table, parse_create_table, parse_create_view};
 use dml::{parse_delete, parse_insert, parse_update};
 use lexer::{eq_ignore_case, expect_ident, expect_kw, Tok, TokenStream};
-use select::{parse_select_inner, parse_select_or_compound, parse_with_clause};
+use select::{
+    parse_select_inner, parse_select_or_compound, parse_with_clause, try_parse_select_literal,
+};
 
 pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
     let mut ts = TokenStream::new(input)?;
@@ -73,6 +75,11 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseError> {
             Ok(stmt)
         }
         Tok::Ident(kw) if eq_ignore_case(&kw, "select") => {
+            if let Some(items) = try_parse_select_literal(&mut ts) {
+                // try_parse_select_literal already confirmed Eof follows.
+                ts.next();
+                return Ok(Statement::SelectLiteral(items));
+            }
             let stmt = parse_select_or_compound(&mut ts, Vec::new())?;
             if !matches!(ts.next(), Tok::Eof) {
                 return Err(ParseError("trailing tokens after statement".to_string()));

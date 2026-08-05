@@ -24,8 +24,10 @@
 #     query output must not themselves contain whitespace.
 #   - Value formatting: SQL NULL renders as the literal token `NULL`.
 #     Integers render as plain decimal. Text renders as-is, unquoted.
-#     `Value` has no float/bool variant today (see spec fact #9), so no
-#     float-formatting rule is needed yet.
+#     Floats render via `f32::to_string`. Booleans render as Postgres's
+#     text-format `t`/`f` (not `true`/`false`) — see the boolean test below
+#     (formerly a gap, spec fact #9 — `Value` had no dedicated bool variant
+#     and rendered `BOOLEAN` columns as plain `0`/`1`; fixed).
 #   - Row order: comparison is order-INSENSITIVE (both sides are sorted
 #     before comparing) unless the query text contains `ORDER BY`, in which
 #     case row order must match exactly.
@@ -37,10 +39,10 @@
 #     explicit column lists in every `query` sidesteps that artifact instead
 #     of baking it into every expected-row line. The one deliberate exception
 #     is divergent/known_bugs.slt's own test of that exact behavior.
-#   - Per this corpus's convention (not a `.slt`-format requirement), no
-#     table or view column here is ever named `id` — that name is reserved
-#     by the implicit row-id column (see divergent/known_bugs.slt fact #1),
-#     and reusing it as a real column name silently loses data today.
+#   - No table or view column here is ever named `id` — that name is
+#     reserved by the implicit row-id column, and `CREATE TABLE` rejects a
+#     user column named `id` outright (see the reserved-name test below;
+#     formerly a silent-data-loss bug, spec fact #1 — fixed).
 #
 # This file: CREATE TABLE / basic INSERT+SELECT / DROP semantics (via
 # CREATE TABLE's duplicate-name check) for the DDL surface confirmed working
@@ -71,6 +73,67 @@ SELECT weight FROM widgets WHERE name = 'nut'
 # than a sentence; see this file's format-convention note on Debug matching.)
 statement error TableAlreadyExists
 CREATE TABLE widgets (name TEXT)
+
+# A user column literally named "id" collides with the implicit row-id
+# column CREATE TABLE always prepends, so it's rejected outright (formerly
+# a silent-data-loss bug — spec fact #1, moved here from
+# divergent/known_bugs.slt now that it's fixed).
+statement error Unsupported
+CREATE TABLE reserved_id_test (id INT, v INT)
+
+# SQL-standard doubled-quote escaping ('It''s' -> "It's") in a text literal
+# (formerly broken — spec fact #6, moved here from divergent/known_bugs.slt
+# now that it's fixed).
+statement ok
+CREATE TABLE quoting (note TEXT)
+
+statement ok
+INSERT INTO quoting (note) VALUES ('It''s')
+
+query T
+SELECT note FROM quoting
+----
+It's
+
+# BOOLEAN columns store as a real Value::Bool now and render as Postgres's
+# "t"/"f" text form (formerly rendered as plain "0"/"1" — spec fact #9,
+# fixed). TRUE/FALSE keyword literals and the legacy 0/1-int spelling both
+# work.
+statement ok
+CREATE TABLE flags (label TEXT, active BOOLEAN)
+
+statement ok
+INSERT INTO flags (label, active) VALUES ('a', TRUE)
+
+statement ok
+INSERT INTO flags (label, active) VALUES ('b', FALSE)
+
+statement ok
+INSERT INTO flags (label, active) VALUES ('c', 1)
+
+query TT
+SELECT label, active FROM flags WHERE active = TRUE ORDER BY label
+----
+a t
+c t
+
+query TT
+SELECT label, active FROM flags WHERE active = FALSE ORDER BY label
+----
+b f
+
+# FROM-less SELECT of pure literals (spec fact #3, partially resolved — see
+# divergent/grammar_gaps.slt for what's still open): a common driver
+# health-check query shape, executed directly without touching any table.
+query I
+SELECT 1
+----
+1
+
+query TI
+SELECT 'hi' AS greeting, 2 AS n
+----
+hi 2
 
 # Multiple column types in one CREATE TABLE.
 statement ok

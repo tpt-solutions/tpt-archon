@@ -33,6 +33,8 @@ pub enum Literal {
     Text(String),
     /// A bracketed `f32[]` vector literal, e.g. `[0.1, 0.9]`.
     Vector(Vec<f32>),
+    /// A `TRUE`/`FALSE` boolean literal.
+    Bool(bool),
     /// SQL `NULL`.
     Null,
 }
@@ -477,8 +479,9 @@ pub struct InsertStatement {
     pub table: String,
     /// Column names in assignment order.
     pub columns: Vec<String>,
-    /// Literal values, positionally aligned with `columns`.
-    pub values: Vec<Literal>,
+    /// One or more rows of literal values (`VALUES (...), (...), ...`),
+    /// each positionally aligned with `columns`.
+    pub values: Vec<Vec<Literal>>,
 }
 
 /// A parsed `UPDATE t SET c = v, ... [WHERE expr]` statement.
@@ -594,11 +597,28 @@ pub struct ResetParameterStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResetAllStatement;
 
+/// A single projected item in a FROM-less `SELECT <literal> [AS alias], ...`
+/// (e.g. `SELECT 1`, `SELECT 'hello' AS greeting`) — see
+/// [`Statement::SelectLiteral`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectLiteralItem {
+    /// The literal value.
+    pub value: Literal,
+    /// Optional `AS alias`; defaults to Postgres's `?column?` when absent.
+    pub alias: Option<String>,
+}
+
 /// A fully parsed statement: any of the supported DML/DQL/DDL forms.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     /// A `SELECT` query.
     Select(SelectStatement),
+    /// A FROM-less `SELECT <literal> [AS alias], ...` — a common driver
+    /// health-check query shape (e.g. `SELECT 1`), kept as a separate
+    /// variant rather than folded into [`SelectStatement`] (whose `table`
+    /// field is mandatory and whose column list is column-names/aggregates
+    /// only, not scalar literals).
+    SelectLiteral(Vec<SelectLiteralItem>),
     /// A compound query: `SELECT ... UNION/INTERSECT/EXCEPT SELECT ...`.
     Compound(CompoundStatement),
     /// An `INSERT` statement.

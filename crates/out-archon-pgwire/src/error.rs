@@ -26,11 +26,19 @@ pub enum PgWireError {
     Codec(#[from] crate::codec::CodecError),
     #[error("UTF-8 conversion error: {0}")]
     FromUtf8(#[from] std::string::FromUtf8Error),
+    #[error("SQL parse error: {0}")]
+    Parse(String),
 }
 
 impl From<tpt_archon_relational::database::DbError> for PgWireError {
     fn from(err: tpt_archon_relational::database::DbError) -> Self {
         PgWireError::Database(err)
+    }
+}
+
+impl From<tpt_archon_relational::parser::ParseError> for PgWireError {
+    fn from(err: tpt_archon_relational::parser::ParseError) -> Self {
+        PgWireError::Parse(err.0)
     }
 }
 
@@ -406,6 +414,7 @@ pub fn pgwire_error_to_sqlstate(err: &PgWireError) -> &'static str {
         InvalidMessage(_) => PROTOCOL_VIOLATION,
         Codec(_) => PROTOCOL_VIOLATION,
         FromUtf8(_) => DATA_EXCEPTION,
+        Parse(_) => SYNTAX_ERROR,
     }
 }
 

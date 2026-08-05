@@ -87,13 +87,14 @@ impl Default for ArchonDb {
 }
 
 /// Converts a [`Value`] to its JSON representation. `Vector` serializes as a
-/// JSON array of numbers; `Null` serializes as JSON `null`.
+/// JSON array of numbers; `Bool` as a JSON boolean; `Null` as JSON `null`.
 fn value_to_json(v: &Value) -> serde_json::Value {
     match v {
         Value::Int(i) => serde_json::json!(i),
         Value::Float(f) => serde_json::json!(f),
         Value::Text(s) => serde_json::json!(s),
         Value::Vector(vec) => serde_json::json!(vec),
+        Value::Bool(b) => serde_json::json!(b),
         Value::Null => serde_json::Value::Null,
     }
 }

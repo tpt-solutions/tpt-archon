@@ -1,17 +1,23 @@
 # INNER JOIN coverage. See ddl.slt for the corpus format convention.
 #
-# Per spec fact #2: qualified ON columns (`ON t1.id = t2.col`) are broken —
-# `run_select_scoped`'s join code looks up the join's `left_col`/`right_col`
-# strings directly against the unqualified column list `scan_table` returns,
-# so a qualified name like `t1.id` never matches. Only unqualified ON
-# columns work. Per fact #1, the implicit `id` column also means an
-# unqualified join column named `id` would silently bind to the *auto*
-# row-id column, not any user-declared `id` column — so this file avoids
-# `id` as a join column name entirely (neither joined table declares a
-# column literally named `id`), sidestepping that landmine rather than
-# tripping over it. Both cases (qualified ON, and the `id`-collision) are
-# covered instead in divergent/known_bugs.slt as known bugs, not attempted
-# against real Postgres.
+# Spec fact #2 (partially fixed): qualified `ON` columns naming a real
+# table in this join (`ON orders.cust_id = customers.cid`) now resolve via
+# exact "table.col" matching instead of the base side falling back to
+# suffix-matching by trailing segment alone (`run_select_scoped` now builds
+# a fully-qualified lookup list for `ON`-clause evaluation specifically —
+# see the comment there). What's NOT fixed: a qualifier naming a table that
+# ISN'T actually part of this join still silently falls back to matching by
+# trailing segment against whatever same-suffix column happens to be in
+# scope, instead of raising an error for the unknown qualifier — the same
+# underlying `find_value` limitation also used (deliberately) for aliased
+# correlated-subquery resolution elsewhere, so tightening it further risks
+# regressing that. Still covered in divergent/known_bugs.slt as a narrower
+# known gap, not attempted against real Postgres. Separately, every table
+# has an implicit `id` row-id column (column 0), and `CREATE TABLE` now
+# rejects a user column also named `id` outright (formerly a silent-
+# collision bug, spec fact #1, fixed — see supported/ddl.slt) — so this file
+# avoids `id` as a join column name entirely, since it would always resolve
+# to the auto column rather than anything meaningful to join on.
 
 statement ok
 CREATE TABLE customers (cid INT, cname TEXT)
@@ -34,10 +40,10 @@ INSERT INTO orders (oid, cust_id, amount) VALUES (101, 1, 75)
 statement ok
 INSERT INTO orders (oid, cust_id, amount) VALUES (102, 2, 20)
 
-# Only unqualified ON columns work; the joined (right-hand) table's columns
-# come back renamed with a `<table>.` prefix regardless of collision, so
-# post-join projection/filtering must use the qualified form for the right
-# table's own columns.
+# Unqualified ON columns work; the joined (right-hand) table's columns come
+# back renamed with a `<table>.` prefix regardless of collision, so post-join
+# projection/filtering must use the qualified form for the right table's own
+# columns.
 query II
 SELECT oid, amount FROM orders JOIN customers ON cust_id = cid WHERE customers.cname = 'alice'
 ----
@@ -55,3 +61,13 @@ SELECT amount FROM orders JOIN customers ON cust_id = cid ORDER BY amount DESC
 75
 50
 20
+
+# Qualified ON columns on BOTH sides (spec fact #2, partially fixed): naming
+# the base table explicitly (`orders.cust_id`) resolves via exact match now,
+# not a coincidental first-suffix-match — same result set as the unqualified
+# form above proves it's resolving to the right column, not silently wrong.
+query II
+SELECT oid, amount FROM orders JOIN customers ON orders.cust_id = customers.cid WHERE customers.cname = 'alice'
+----
+100 50
+101 75

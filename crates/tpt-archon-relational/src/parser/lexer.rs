@@ -122,15 +122,29 @@ impl<'a> Lexer<'a> {
             }
             b'\'' => {
                 self.pos += 1;
-                let start = self.pos;
-                while self.pos < b.len() && b[self.pos] != b'\'' {
+                let mut text = String::new();
+                let mut chunk_start = self.pos;
+                loop {
+                    if self.pos >= b.len() {
+                        return Err(ParseError("unterminated text literal".to_string()));
+                    }
+                    if b[self.pos] == b'\'' {
+                        // SQL-standard doubled-quote escaping: `''` inside a
+                        // literal means a single literal `'`, not the end of
+                        // the literal.
+                        if self.pos + 1 < b.len() && b[self.pos + 1] == b'\'' {
+                            text.push_str(&self.s[chunk_start..self.pos]);
+                            text.push('\'');
+                            self.pos += 2;
+                            chunk_start = self.pos;
+                            continue;
+                        }
+                        text.push_str(&self.s[chunk_start..self.pos]);
+                        self.pos += 1;
+                        break;
+                    }
                     self.pos += 1;
                 }
-                if self.pos >= b.len() {
-                    return Err(ParseError("unterminated text literal".to_string()));
-                }
-                let text = self.s[start..self.pos].to_string();
-                self.pos += 1;
                 Ok(Tok::Text(text))
             }
             c if c.is_ascii_digit() || c == b'-' => {

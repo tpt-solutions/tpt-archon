@@ -30,15 +30,24 @@ pub(super) fn parse_insert(ts: &mut TokenStream) -> Result<InsertStatement, Pars
         }
     }
     expect_kw(ts, "values")?;
-    expect_tok(ts, Tok::LParen, "'(' before values")?;
     let mut values = Vec::new();
     loop {
-        values.push(parse_literal(ts)?);
-        match ts.next() {
-            Tok::Comma => continue,
-            Tok::RParen => break,
-            _ => return Err(ParseError("expected ',' or ')'".to_string())),
+        expect_tok(ts, Tok::LParen, "'(' before values")?;
+        let mut row = Vec::new();
+        loop {
+            row.push(parse_literal(ts)?);
+            match ts.next() {
+                Tok::Comma => continue,
+                Tok::RParen => break,
+                _ => return Err(ParseError("expected ',' or ')'".to_string())),
+            }
         }
+        values.push(row);
+        if let Tok::Comma = ts.peek() {
+            ts.next();
+            continue;
+        }
+        break;
     }
     if !matches!(ts.next(), Tok::Eof) {
         return Err(ParseError("trailing tokens after statement".to_string()));

@@ -86,7 +86,9 @@ impl Database {
     }
 
     /// `(column_name, column_type)` pairs for `table`, or `None` if it
-    /// doesn't exist. `column_type` is one of `"INT"`, `"TEXT"`, `"VECTOR"`.
+    /// doesn't exist. `column_type` is one of `"INT"`, `"BOOLEAN"`,
+    /// `"FLOAT"`, `"DOUBLE"`, `"NUMERIC"`, `"TEXT"`, `"VARCHAR"`, `"DATE"`,
+    /// `"TIMESTAMP"`, `"VECTOR"`.
     fn schema(&self, table: &str) -> Option<Vec<(String, &'static str)>> {
         self.inner.table_schema(table).map(|schema| {
             schema
@@ -102,19 +104,28 @@ impl Database {
 fn column_type_name(ty: &RsColumnType) -> &'static str {
     match ty {
         RsColumnType::Int => "INT",
+        RsColumnType::Boolean => "BOOLEAN",
+        RsColumnType::Float => "FLOAT",
+        RsColumnType::Double => "DOUBLE",
+        RsColumnType::Numeric => "NUMERIC",
         RsColumnType::Text => "TEXT",
+        RsColumnType::Varchar(_) => "VARCHAR",
+        RsColumnType::Date => "DATE",
+        RsColumnType::Timestamp => "TIMESTAMP",
         RsColumnType::Vector => "VECTOR",
     }
 }
 
 /// Maps one engine [`RsValue`] to the native Python object it represents:
-/// `Int` -> `int`, `Text` -> `str`, `Vector` -> `list[float]`, `Null` ->
-/// `None`.
+/// `Int` -> `int`, `Float` -> `float`, `Text` -> `str`, `Vector` ->
+/// `list[float]`, `Bool` -> `bool`, `Null` -> `None`.
 fn value_to_py(py: Python<'_>, value: &RsValue) -> PyObject {
     match value {
         RsValue::Int(i) => i.into_py(py),
+        RsValue::Float(f) => f.into_py(py),
         RsValue::Text(s) => s.into_py(py),
         RsValue::Vector(v) => v.clone().into_py(py),
+        RsValue::Bool(b) => b.into_py(py),
         RsValue::Null => py.None(),
     }
 }

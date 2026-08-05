@@ -2,31 +2,38 @@
 # convention. (HAVING is deliberately not covered here — see the note
 # below.)
 #
-# Per spec fact #5, AVG/SUM diverge from Postgres on empty input (Archon
-# returns integer 0, Postgres returns NULL/numeric) and AVG does integer
-# division. Note AVG is deliberately NOT included below even for non-empty,
-# evenly-dividing groups: Postgres's `AVG(int)` always returns `numeric`
-# (not plain integer/bigint), and `numeric`'s own text/JSON representation
-# keeps its computed decimal scale (e.g. `150.0000000000000000`, not `150`)
-# regardless of whether the division happened to come out even — so the
-# *value* can agree while the *wire format* still doesn't, which is exactly
-# what this corpus's byte-level row comparison would catch. That is a
-# real, additional facet of fact #5 beyond the plan's original framing (the
-# plan's "non-empty AVG cases match Postgres" assumption undersells this),
-# so AVG stays entirely in divergent/aggregates.slt instead. SUM/COUNT/MIN/
-# MAX don't have this problem: Postgres's `SUM(int4)`/`COUNT(*)` return
-# `bigint` and `MIN`/`MAX` return the input's own type, but all of those
-# serialize as a bare decimal integer token same as Archon's `Value::Int`,
-# so they're safe here.
+# Per spec fact #5 (now fixed for SUM, MIN, MAX, and empty-input NULL-ness
+# generally): SUM/AVG over zero non-NULL input return SQL NULL, matching
+# Postgres and this file's own MIN/MAX (which already returned NULL on
+# empty input before this fix). NULL has no type-representation ambiguity —
+# it renders identically regardless of declared column type — so the
+# empty-input case is genuinely Postgres-matching here, independent of the
+# separate numeric-vs-float wire-format nuance below.
+#
+# AVG is deliberately NOT included below even for non-empty, evenly-
+# dividing groups: Postgres's `AVG(int)` always returns `numeric` (not plain
+# integer/bigint or float), and `numeric`'s own text/JSON representation
+# keeps its computed decimal scale (e.g. `150.0000000000000000`, not `150`
+# or `150.0`) regardless of whether the division happened to come out even
+# — so the *value* can agree (AVG now divides as a float instead of
+# truncating via integer division) while the *wire format* still doesn't,
+# which is exactly what this corpus's byte-level row comparison would
+# catch. So AVG's non-empty case stays entirely in divergent/aggregates.slt.
+# SUM/COUNT/MIN/MAX don't have this problem: Postgres's `SUM(int4)`/
+# `COUNT(*)` return `bigint` and `MIN`/`MAX` return the input's own type,
+# but all of those serialize as a bare decimal integer token same as
+# Archon's `Value::Int`, so they're safe here.
 #
 # Aggregates are always given an explicit `AS alias` (matching the engine's
 # own test suite). HAVING is NOT covered in this file at all — see
-# divergent/aggregates.slt for why: Archon's HAVING only accepts the SELECT
-# list's declared alias (confirmed: a raw `HAVING COUNT(*) >= n` errors
-# `UnknownColumn("count")`), while real Postgres requires the opposite (a
-# raw aggregate expression, not an output alias — HAVING is evaluated before
-# SELECT-list aliases exist per standard SQL logical query order). No single
-# HAVING form is accepted by both engines today, so it can't live here.
+# divergent/aggregates.slt for why: Archon's HAVING accepts BOTH the SELECT
+# list's declared alias (`HAVING cnt >= 2`) AND the raw aggregate expression
+# (`HAVING COUNT(*) >= 2`) — a deliberate superset kept on purpose (2026-08-
+# 04 decision), not a gap to close. Real Postgres accepts only the second
+# form (HAVING is evaluated before SELECT-list aliases exist per standard
+# SQL logical query order). Since Postgres rejects the first form Archon
+# additionally allows, there's still no single HAVING spelling both engines
+# accept, so it can't live in this byte-comparison-with-Postgres file.
 
 statement ok
 CREATE TABLE employees (dept TEXT, salary INT)
@@ -75,3 +82,34 @@ query I
 SELECT COUNT(*) AS cnt FROM employees
 ----
 5
+
+# Empty table, no GROUP BY: SUM/AVG over zero rows return SQL NULL (spec
+# fact #5, fixed) — same as MIN/MAX already did. COUNT stays 0, not NULL,
+# matching Postgres (COUNT never returns NULL).
+statement ok
+CREATE TABLE nobody (salary INT)
+
+query I
+SELECT SUM(salary) AS total FROM nobody
+----
+NULL
+
+query I
+SELECT AVG(salary) AS avg_salary FROM nobody
+----
+NULL
+
+query I
+SELECT MIN(salary) AS lo FROM nobody
+----
+NULL
+
+query I
+SELECT MAX(salary) AS hi FROM nobody
+----
+NULL
+
+query I
+SELECT COUNT(*) AS cnt FROM nobody
+----
+0

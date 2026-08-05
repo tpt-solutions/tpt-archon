@@ -1,39 +1,36 @@
 [package]
 name = "out-archon-verify"
-version = "0.1.0"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-rust-version = "1.74"
-authors = ["TPT Solutions"]
-repository = "https://github.com/tpt-solutions/tpt-archon"
-homepage = "https://github.com/tpt-solutions/tpt-archon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish = false
 description = "Verification harness for tpt-archon: eidos structural invariants, telos formal proofs, and GPU IR emission smoke tests"
 
-# This crate is intentionally NOT published, and (see root Cargo.toml's
-# `exclude`) intentionally NOT a member of the root workspace either: it
-# depends on git-hosted ecosystem verifiers (tpt-eidos-verifier, tpt-telos-*,
-# tpt-gpu-ir-spec), and crates.io rejects git dependencies even in
-# dev-dependencies, so keeping it out of the workspace is what lets
-# `cargo publish -p tpt-archon-core --dry-run` stay clean (see ADR 0003).
+# Not published: an internal verification harness, not one of the layered
+# architecture crates (see CLAUDE.md/AGENTS.md). Package name carries the
+# `out-archon-` not-published-crate prefix per the workspace's publish/
+# no-publish naming convention, same as `out-archon-sql`.
 #
-# Because it's excluded, it can't use `field.workspace = true` inheritance
-# above — Cargo only resolves that for actual workspace members, and this
-# crate is built standalone (`cd crates/out-archon-verify && cargo test`, or
-# `cargo test -p out-archon-verify --manifest-path crates/out-archon-verify/Cargo.toml`
-# from the repo root) precisely because it isn't one. Update these fields by
-# hand if the workspace-wide values in the root `Cargo.toml` change.
+# A normal workspace member as of 2026-08-04: it previously depended on
+# git-hosted ecosystem verifiers and was excluded from the workspace/its own
+# CI job for that reason (crates.io rejects git deps, and fetching them
+# needed network beyond the standard registry). All of `tpt-eidos-verifier`,
+# `tpt-telos-verifier`/`tpt-telos-ir`/`tpt-telos-parser`, and `tpt-gpu-ir-spec`
+# are now published to crates.io, so those constraints no longer apply — see
+# TODO.md Phase 9.
 
 [dependencies]
 tpt-archon-core = { path = "../tpt-archon-core", default-features = false }
 
-# Pin to exact commits known to build as consumers. Cargo records the resolved
-# commit in Cargo.lock; bump deliberately when an upstream release is validated.
-tpt-eidos-verifier = { git = "https://github.com/tpt-solutions/tpt-eidos.git", package = "tpt-eidos-verifier", rev = "517f2e1" }
-tpt-telos-verifier = { git = "https://github.com/tpt-solutions/tpt-telos.git", package = "tpt-telos-verifier", rev = "ec7faca" }
-tpt-telos-ir = { git = "https://github.com/tpt-solutions/tpt-telos.git", package = "tpt-telos-ir", rev = "ec7faca" }
-tpt-telos-parser = { git = "https://github.com/tpt-solutions/tpt-telos.git", package = "tpt-telos-parser", rev = "ec7faca" }
-tpt-gpu-ir-spec = { git = "https://github.com/tpt-solutions/tpt-gpu.git", package = "tpt-gpu-ir-spec", rev = "cb33993" }
+tpt-eidos-verifier = "0.2.0"
+tpt-telos-verifier = "0.1.1"
+tpt-telos-ir = "0.1.1"
+tpt-telos-parser = "0.1.1"
+tpt-gpu-ir-spec = "0.1.0"
 
 [dev-dependencies]
 tpt-archon-relational = { path = "../tpt-archon-relational", default-features = false, features = ["std"] }

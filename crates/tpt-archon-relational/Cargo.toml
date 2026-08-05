@@ -30,4 +30,4 @@ gpu = ["dep:tpt-gpu-ir-spec"]
 tpt-archon-core = { path = "../tpt-archon-core", version = "0.1.0", default-features = false }
 tpt-archon-bridge = { path = "../tpt-archon-bridge", version = "0.1.0", default-features = false }
 tpt-archon-kernel = { path = "../tpt-archon-kernel", version = "0.1.0", default-features = false }
-tpt-gpu-ir-spec = { git = "https://github.com/tpt-solutions/tpt-gpu.git", package = "tpt-gpu-ir-spec", rev = "cb33993", optional = true }
+tpt-gpu-ir-spec = { version = "0.1.0", optional = true }

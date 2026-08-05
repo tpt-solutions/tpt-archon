@@ -110,6 +110,7 @@ pub fn eval_expr_scoped(
                 (Value::Int(l), Value::Int(r)) => Ok(Some(eval_cmp(*op, *l, *r))),
                 (Value::Float(l), Value::Float(r)) => Ok(Some(eval_float_cmp(*op, *l, *r))),
                 (Value::Text(l), Value::Text(r)) => Ok(Some(eval_text_cmp(*op, l, r))),
+                (Value::Bool(l), Value::Bool(r)) => Ok(Some(eval_cmp(*op, *l, *r))),
                 _ => Err(ExecError::TypeMismatch),
             }
         }
@@ -123,6 +124,7 @@ pub fn eval_expr_scoped(
                 (Value::Int(l), Value::Int(r)) => Ok(Some(eval_cmp(*op, *l, *r))),
                 (Value::Float(l), Value::Float(r)) => Ok(Some(eval_float_cmp(*op, *l, *r))),
                 (Value::Text(l), Value::Text(r)) => Ok(Some(eval_text_cmp(*op, l, r))),
+                (Value::Bool(l), Value::Bool(r)) => Ok(Some(eval_cmp(*op, *l, *r))),
                 _ => Err(ExecError::TypeMismatch),
             }
         }

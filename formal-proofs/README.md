@@ -47,8 +47,9 @@ so a silently-edited proof source that no longer matches what was actually
 verified fails CI loudly instead of drifting unnoticed.
 
 To verify a single file with the standalone `tpt-telos` frontend
-(built from `github.com/tpt-solutions/tpt-telos` at the rev pinned in
-`crates/out-archon-verify/Cargo.toml`):
+(built from `github.com/tpt-solutions/tpt-telos`, matching the
+`tpt-telos-verifier` version `crates/out-archon-verify/Cargo.toml` depends
+on):
 
 ```sh
 telos verify formal-proofs/btree.telos

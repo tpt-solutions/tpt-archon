@@ -97,6 +97,28 @@ impl Database {
                 new_cols.push(alloc::format!("{}.{}", join.table.name(), rcol));
             }
 
+            // A fully-qualified ("table.col") view of `new_cols`, used only
+            // to evaluate `on` below — never exposed as the query's actual
+            // column list (that stays `new_cols`, unqualified on the base
+            // side, so unqualified SELECT-list/WHERE/GROUP BY references
+            // keep resolving exactly as before). The join side is already
+            // qualified above; only the base side's still-bare names need
+            // it here. Without this, `find_value` falls back to matching a
+            // qualified name's trailing segment against ANY column with a
+            // matching suffix regardless of which table was actually named
+            // — e.g. `t4.id` would silently resolve to `t3`'s `id` if it
+            // came first in `new_cols`, not `t4`'s own `id` (spec fact #2).
+            let on_cols: Vec<String> = new_cols
+                .iter()
+                .map(|c| {
+                    if c.contains('.') {
+                        c.clone()
+                    } else {
+                        alloc::format!("{}.{c}", stmt.table.name())
+                    }
+                })
+                .collect();
+
             let mut new_rows = Vec::new();
 
             match join.jtype {
@@ -115,7 +137,7 @@ impl Database {
                         for jrow in &join_rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &new_cols, &combined)? {
+                            if executor::eval_expr(on, &on_cols, &combined)? {
                                 new_rows.push(combined);
                             }
                         }
@@ -131,7 +153,7 @@ impl Database {
                         for jrow in &join_rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &new_cols, &combined)? {
+                            if executor::eval_expr(on, &on_cols, &combined)? {
                                 new_rows.push(combined);
                                 matched = true;
                             }
@@ -153,7 +175,7 @@ impl Database {
                         for lrow in &rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &new_cols, &combined)? {
+                            if executor::eval_expr(on, &on_cols, &combined)? {
                                 new_rows.push(combined);
                                 matched = true;
                             }
@@ -178,7 +200,7 @@ impl Database {
                         for jrow in &join_rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &new_cols, &combined)? {
+                            if executor::eval_expr(on, &on_cols, &combined)? {
                                 new_rows.push(combined);
                                 left_matched[li] = true;
                             }
@@ -196,7 +218,7 @@ impl Database {
                         for lrow in &rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &new_cols, &combined)? {
+                            if executor::eval_expr(on, &on_cols, &combined)? {
                                 matched = true;
                                 break;
                             }

@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `docs/POSTGRES_COMPATIBILITY.md` — honest PostgreSQL divergence catalog
+  generated from `tests/slt/divergent/` (Phase 8 / Track C). Closes the §5.2 /
+  Phase 6 reconciliation items with a machine-tracked artifact instead of
+  rhetoric; the `divergent/` corpus is its source of truth.
 - Workspace bootstrap: `tpt-archon-core`, `tpt-archon-bridge`, `tpt-archon-kernel`,
   `tpt-archon-relational` crate scaffolds.
 - `tpt-archon-core`: `BlockDevice` trait and `InMemoryBlockDevice`.
@@ -59,6 +63,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no `tpt-gpu-primitives`/`tpt-gpu-runtime`; `tpt-gpu-ir-spec` is an IR emitter
   (no runtime). `formal-proofs/README.md` now states the `.telos` artifacts are
   QF_LRA solver-checked assertion harnesses, not machine-checked Coq/Lean proofs.
+- `out-archon-verify` rejoined the default workspace now that
+  `tpt-eidos-verifier`/`tpt-telos-verifier`/`tpt-telos-ir`/`tpt-telos-parser`/
+  `tpt-gpu-ir-spec` are all published to crates.io: its `git`+`rev` dependency
+  pins were swapped for ordinary version requirements, and the now-redundant
+  opt-in `verify` CI job and its dedicated `deny.toml` were removed (see
+  `TODO.md` Phase 9). It remains unpublished (`publish = false`) per the
+  `out-archon-` naming convention, unrelated to this change.
 
 ### Added
 - `tpt-archon-core`: `storage` module — `StorageEngine` facade wiring `BufferPool`

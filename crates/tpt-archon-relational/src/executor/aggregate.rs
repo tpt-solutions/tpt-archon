@@ -108,31 +108,63 @@ pub(crate) fn eval_aggregate(
 
     match func {
         AggregateFunc::Count => unreachable!(),
+        // SUM/AVG over zero matching (non-NULL) rows return SQL NULL, not a
+        // bare 0 — matching Postgres and this file's own existing MIN/MAX
+        // precedent just below (spec fact #5, empty-input half). AVG always
+        // divides as a float now instead of truncating to integer division
+        // (spec fact #5, division half) — Postgres's AVG(int) returns exact-
+        // precision `numeric` regardless of type, which `Value::Float`
+        // doesn't replicate byte-for-byte (still tracked as a residual wire-
+        // format divergence in divergent/aggregates.slt), but the *value* is
+        // now correct instead of silently wrong.
         AggregateFunc::Sum => {
-            let sum: i64 = rows
-                .iter()
-                .filter_map(|r| match &r[idx] {
-                    Value::Int(v) => Some(*v),
-                    Value::Float(v) => Some(*v as i64),
-                    _ => None,
-                })
-                .sum();
-            Ok(Value::Int(sum))
+            let mut int_sum: i64 = 0;
+            let mut float_sum: f64 = 0.0;
+            let mut saw_float = false;
+            let mut any = false;
+            for r in rows {
+                match &r[idx] {
+                    Value::Int(v) => {
+                        any = true;
+                        int_sum += v;
+                        float_sum += *v as f64;
+                    }
+                    Value::Float(v) => {
+                        any = true;
+                        saw_float = true;
+                        float_sum += *v as f64;
+                    }
+                    _ => {}
+                }
+            }
+            if !any {
+                Ok(Value::Null)
+            } else if saw_float {
+                Ok(Value::Float(float_sum as f32))
+            } else {
+                Ok(Value::Int(int_sum))
+            }
         }
         AggregateFunc::Avg => {
-            let vals: Vec<i64> = rows
-                .iter()
-                .filter_map(|r| match &r[idx] {
-                    Value::Int(v) => Some(*v),
-                    Value::Float(v) => Some(*v as i64),
-                    _ => None,
-                })
-                .collect();
-            if vals.is_empty() {
-                Ok(Value::Int(0))
+            let mut sum: f64 = 0.0;
+            let mut count: u64 = 0;
+            for r in rows {
+                match &r[idx] {
+                    Value::Int(v) => {
+                        sum += *v as f64;
+                        count += 1;
+                    }
+                    Value::Float(v) => {
+                        sum += *v as f64;
+                        count += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if count == 0 {
+                Ok(Value::Null)
             } else {
-                let avg = vals.iter().sum::<i64>() / vals.len() as i64;
-                Ok(Value::Int(avg))
+                Ok(Value::Float((sum / count as f64) as f32))
             }
         }
         AggregateFunc::Min => {

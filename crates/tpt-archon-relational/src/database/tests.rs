@@ -62,10 +62,10 @@ fn arity_and_type_errors() {
     let ins = InsertStatement {
         table: "t".to_string(),
         columns: alloc::vec!["id".to_string()],
-        values: alloc::vec![
+        values: alloc::vec![alloc::vec![
             crate::parser::Literal::Int(1),
             crate::parser::Literal::Int(2),
-        ],
+        ]],
     };
     assert!(matches!(
         d.execute_checked(&Statement::Insert(ins)),
@@ -239,11 +239,82 @@ fn create_table_and_insert() {
 }
 
 #[test]
+fn from_less_select_literal_end_to_end() {
+    let mut d = Database::empty();
+    let r = d
+        .execute(&parse_statement("SELECT 1").unwrap(), &[])
+        .unwrap();
+    assert_eq!(r.columns, alloc::vec!["?column?".to_string()]);
+    assert_eq!(r.rows, alloc::vec![alloc::vec![Value::Int(1)]]);
+
+    let r = d
+        .execute(
+            &parse_statement("SELECT 1 AS one, 'hi' AS greeting").unwrap(),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        r.columns,
+        alloc::vec!["one".to_string(), "greeting".to_string()]
+    );
+    assert_eq!(
+        r.rows,
+        alloc::vec![alloc::vec![Value::Int(1), Value::Text("hi".to_string())]]
+    );
+}
+
+#[test]
+fn multi_row_insert() {
+    let mut d = Database::empty();
+    d.execute(
+        &parse_statement("CREATE TABLE users (name TEXT, age INT)").unwrap(),
+        &[],
+    )
+    .unwrap();
+    let r = d
+        .execute(
+            &parse_statement(
+                "INSERT INTO users (name, age) VALUES ('alice', 30), ('bob', 25), ('cara', 40)",
+            )
+            .unwrap(),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(r.affected, Some(3));
+    assert_eq!(d.len(), 3);
+    let r = d
+        .execute(
+            &parse_statement("SELECT name FROM users WHERE age >= 30 ORDER BY name").unwrap(),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        r.rows,
+        alloc::vec![
+            alloc::vec![Value::Text("alice".to_string())],
+            alloc::vec![Value::Text("cara".to_string())],
+        ]
+    );
+}
+
+#[test]
 fn create_table_duplicate_errors() {
     let mut d = Database::new(schema());
     assert!(matches!(
         d.execute(&parse_statement("CREATE TABLE t (x INT)").unwrap(), &[]),
         Err(DbError::TableAlreadyExists(_))
+    ));
+}
+
+#[test]
+fn create_table_with_user_id_column_errors() {
+    let mut d = Database::empty();
+    assert!(matches!(
+        d.execute(
+            &parse_statement("CREATE TABLE t1 (id INT, v INT)").unwrap(),
+            &[]
+        ),
+        Err(DbError::Unsupported(_))
     ));
 }
 
@@ -1053,14 +1124,14 @@ fn having_with_and_or() {
 fn uncorrelated_exists_is_cached() {
     let mut d = Database::empty();
     d.execute(
-        &parse_statement("CREATE TABLE t (id INT, name TEXT)").unwrap(),
+        &parse_statement("CREATE TABLE t (uid INT, name TEXT)").unwrap(),
         &[],
     )
     .unwrap();
     d.execute(&parse_statement("CREATE TABLE t2 (val INT)").unwrap(), &[])
         .unwrap();
     for i in 0..5 {
-        let sql = alloc::format!("INSERT INTO t (id, name) VALUES ({i}, 'u{i}')");
+        let sql = alloc::format!("INSERT INTO t (uid, name) VALUES ({i}, 'u{i}')");
         d.execute(&parse_statement(&sql).unwrap(), &[]).unwrap();
     }
     d.execute(
@@ -1072,7 +1143,7 @@ fn uncorrelated_exists_is_cached() {
     // Should return all rows since t2 has at least one row.
     let r = d
         .execute(
-            &parse_statement("SELECT id FROM t WHERE EXISTS (SELECT val FROM t2 WHERE val > 5)")
+            &parse_statement("SELECT uid FROM t WHERE EXISTS (SELECT val FROM t2 WHERE val > 5)")
                 .unwrap(),
             &[],
         )
@@ -1081,7 +1152,7 @@ fn uncorrelated_exists_is_cached() {
     // No matching row: t2.val = 10, not < 5.
     let r2 = d
         .execute(
-            &parse_statement("SELECT id FROM t WHERE EXISTS (SELECT val FROM t2 WHERE val < 5)")
+            &parse_statement("SELECT uid FROM t WHERE EXISTS (SELECT val FROM t2 WHERE val < 5)")
                 .unwrap(),
             &[],
         )
@@ -1093,14 +1164,14 @@ fn uncorrelated_exists_is_cached() {
 fn uncorrelated_in_subquery_is_cached() {
     let mut d = Database::empty();
     d.execute(
-        &parse_statement("CREATE TABLE t (id INT, name TEXT)").unwrap(),
+        &parse_statement("CREATE TABLE t (uid INT, name TEXT)").unwrap(),
         &[],
     )
     .unwrap();
     d.execute(&parse_statement("CREATE TABLE t2 (val INT)").unwrap(), &[])
         .unwrap();
     for i in 0..5 {
-        let sql = alloc::format!("INSERT INTO t (id, name) VALUES ({i}, 'u{i}')");
+        let sql = alloc::format!("INSERT INTO t (uid, name) VALUES ({i}, 'u{i}')");
         d.execute(&parse_statement(&sql).unwrap(), &[]).unwrap();
     }
     d.execute(
@@ -1116,7 +1187,7 @@ fn uncorrelated_in_subquery_is_cached() {
     // Uncorrelated IN subquery.
     let r = d
         .execute(
-            &parse_statement("SELECT id FROM t WHERE id IN (SELECT val FROM t2)").unwrap(),
+            &parse_statement("SELECT uid FROM t WHERE uid IN (SELECT val FROM t2)").unwrap(),
             &[],
         )
         .unwrap();
@@ -1129,14 +1200,14 @@ fn uncorrelated_in_subquery_is_cached() {
 fn mixed_correlated_uncorrelated_subqueries() {
     let mut d = Database::empty();
     d.execute(
-        &parse_statement("CREATE TABLE t (id INT, name TEXT)").unwrap(),
+        &parse_statement("CREATE TABLE t (uid INT, name TEXT)").unwrap(),
         &[],
     )
     .unwrap();
     d.execute(&parse_statement("CREATE TABLE t2 (val INT)").unwrap(), &[])
         .unwrap();
     for i in 0..5 {
-        let sql = alloc::format!("INSERT INTO t (id, name) VALUES ({i}, 'u{i}')");
+        let sql = alloc::format!("INSERT INTO t (uid, name) VALUES ({i}, 'u{i}')");
         d.execute(&parse_statement(&sql).unwrap(), &[]).unwrap();
     }
     d.execute(
@@ -1146,13 +1217,13 @@ fn mixed_correlated_uncorrelated_subqueries() {
     .unwrap();
     // Both correlated AND uncorrelated subqueries in one WHERE.
     // uncorrelated: EXISTS (t2 WHERE val > 5) → always true
-    // correlated: t.id < 3 → filters to id 0,1,2
+    // correlated: t.uid < 3 → filters to uid 0,1,2
     let r = d
         .execute(
             &parse_statement(
-                "SELECT id FROM t WHERE EXISTS \
+                "SELECT uid FROM t WHERE EXISTS \
                  (SELECT val FROM t2 WHERE val > 5) \
-                 AND id < 3",
+                 AND uid < 3",
             )
             .unwrap(),
             &[],
@@ -1168,14 +1239,14 @@ fn mixed_correlated_uncorrelated_subqueries() {
 fn uncorrelated_scalar_subquery_is_cached() {
     let mut d = Database::empty();
     d.execute(
-        &parse_statement("CREATE TABLE t (id INT, name TEXT)").unwrap(),
+        &parse_statement("CREATE TABLE t (uid INT, name TEXT)").unwrap(),
         &[],
     )
     .unwrap();
     d.execute(&parse_statement("CREATE TABLE t2 (val INT)").unwrap(), &[])
         .unwrap();
     for i in 0..5 {
-        let sql = alloc::format!("INSERT INTO t (id, name) VALUES ({i}, 'u{i}')");
+        let sql = alloc::format!("INSERT INTO t (uid, name) VALUES ({i}, 'u{i}')");
         d.execute(&parse_statement(&sql).unwrap(), &[]).unwrap();
     }
     d.execute(
@@ -1183,10 +1254,10 @@ fn uncorrelated_scalar_subquery_is_cached() {
         &[],
     )
     .unwrap();
-    // Uncorrelated scalar subquery: id > (SELECT val FROM t2) → id > 3 → id=4 only.
+    // Uncorrelated scalar subquery: uid > (SELECT val FROM t2) → uid > 3 → uid=4 only.
     let r = d
         .execute(
-            &parse_statement("SELECT id FROM t WHERE id > (SELECT val FROM t2)").unwrap(),
+            &parse_statement("SELECT uid FROM t WHERE uid > (SELECT val FROM t2)").unwrap(),
             &[],
         )
         .unwrap();
@@ -1306,23 +1377,23 @@ fn parse(s: &str) -> crate::parser::Statement {
 #[test]
 fn extract_year_from_date_column() {
     let mut d = Database::empty();
-    d.execute(&parse("CREATE TABLE events (id INT, happened DATE)"), &[])
+    d.execute(&parse("CREATE TABLE events (eid INT, happened DATE)"), &[])
         .unwrap();
     // 2024-06-15 = 19889 days since epoch (approx)
     d.execute(
-        &parse("INSERT INTO events (id, happened) VALUES (1, 19889)"),
+        &parse("INSERT INTO events (eid, happened) VALUES (1, 19889)"),
         &[],
     )
     .unwrap();
     // 2023-01-01 = 19358 days since epoch (approx)
     d.execute(
-        &parse("INSERT INTO events (id, happened) VALUES (2, 19358)"),
+        &parse("INSERT INTO events (eid, happened) VALUES (2, 19358)"),
         &[],
     )
     .unwrap();
     let r = d
         .execute(
-            &parse("SELECT id FROM events WHERE EXTRACT(YEAR FROM happened) = 2024"),
+            &parse("SELECT eid FROM events WHERE EXTRACT(YEAR FROM happened) = 2024"),
             &[],
         )
         .unwrap();
@@ -1333,26 +1404,26 @@ fn extract_year_from_date_column() {
 #[test]
 fn extract_month_from_date_column() {
     let mut d = Database::empty();
-    d.execute(&parse("CREATE TABLE events (id INT, happened DATE)"), &[])
+    d.execute(&parse("CREATE TABLE events (eid INT, happened DATE)"), &[])
         .unwrap();
     // March = month 3. Days since epoch for 2024-03-15...
     // 2024-03-15: year=2024, month=3, day=15
     // 2024-01-01 = 19723 days since epoch
     // 2024-03-15 = 19723 + 31 (Jan) + 29 (Feb leap) + 14 = 19797
     d.execute(
-        &parse("INSERT INTO events (id, happened) VALUES (1, 19797)"),
+        &parse("INSERT INTO events (eid, happened) VALUES (1, 19797)"),
         &[],
     )
     .unwrap();
     // 2024-06-15 = 19723 + 31 + 29 + 31 + 30 + 31 + 14 = 19889
     d.execute(
-        &parse("INSERT INTO events (id, happened) VALUES (2, 19889)"),
+        &parse("INSERT INTO events (eid, happened) VALUES (2, 19889)"),
         &[],
     )
     .unwrap();
     let r = d
         .execute(
-            &parse("SELECT id FROM events WHERE EXTRACT(MONTH FROM happened) >= 4"),
+            &parse("SELECT eid FROM events WHERE EXTRACT(MONTH FROM happened) >= 4"),
             &[],
         )
         .unwrap();
@@ -1363,15 +1434,15 @@ fn extract_month_from_date_column() {
 #[test]
 fn extract_is_null_on_nullable_date() {
     let mut d = Database::empty();
-    d.execute(&parse("CREATE TABLE t (id INT, d DATE)"), &[])
+    d.execute(&parse("CREATE TABLE t (rid INT, d DATE)"), &[])
         .unwrap();
-    d.execute(&parse("INSERT INTO t (id, d) VALUES (1, NULL)"), &[])
+    d.execute(&parse("INSERT INTO t (rid, d) VALUES (1, NULL)"), &[])
         .unwrap();
-    d.execute(&parse("INSERT INTO t (id, d) VALUES (2, 19723)"), &[])
+    d.execute(&parse("INSERT INTO t (rid, d) VALUES (2, 19723)"), &[])
         .unwrap();
     let r = d
         .execute(
-            &parse("SELECT id FROM t WHERE EXTRACT(YEAR FROM d) IS NULL"),
+            &parse("SELECT rid FROM t WHERE EXTRACT(YEAR FROM d) IS NULL"),
             &[],
         )
         .unwrap();

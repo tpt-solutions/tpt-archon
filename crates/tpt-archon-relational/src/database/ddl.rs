@@ -19,6 +19,13 @@ impl Database {
         if self.table(&ct.table).is_some() {
             return Err(DbError::TableAlreadyExists(ct.table.clone()));
         }
+        // "id" is reserved for the implicit row-id column prepended below;
+        // a user column of the same name would silently collide with it.
+        if ct.columns.iter().any(|c| c.name == "id") {
+            return Err(DbError::Unsupported(
+                "column 'id' is reserved for the implicit row-id column".to_string(),
+            ));
+        }
         let mut columns = Vec::new();
         let mut types = Vec::new();
         // First column is always the implicit row_id.

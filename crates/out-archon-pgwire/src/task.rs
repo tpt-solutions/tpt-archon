@@ -495,6 +495,12 @@ impl PgConnectionTask {
                         payload.put_i32(s.len() as i32);
                         payload.put_slice(s.as_bytes());
                     }
+                    tpt_archon_relational::executor::Value::Bool(b) => {
+                        // Postgres's text bool format is "t"/"f".
+                        let s = if *b { "t" } else { "f" };
+                        payload.put_i32(s.len() as i32);
+                        payload.put_slice(s.as_bytes());
+                    }
                 }
             }
             write_message(&mut self.write_buf, b'D', &payload);

@@ -53,6 +53,10 @@ pub(super) fn encode_row(values: &[Value]) -> Vec<u8> {
                 out.push(4);
                 out.extend_from_slice(&f.to_le_bytes());
             }
+            Value::Bool(b) => {
+                out.push(6);
+                out.push(*b as u8);
+            }
             Value::Null => {
                 out.push(3);
             }
@@ -138,6 +142,14 @@ pub(super) fn try_decode_row(bytes: &[u8]) -> Result<Vec<Value>, DbError> {
                 row.push(Value::Float(f32::from_le_bytes(b)));
             }
             5 => row.push(Value::Null),
+            6 => {
+                if pos >= bytes.len() {
+                    return Err(DbError::CorruptRow(0));
+                }
+                let b = bytes[pos] != 0;
+                pos += 1;
+                row.push(Value::Bool(b));
+            }
             _ => row.push(Value::Int(0)),
         }
     }
@@ -172,8 +184,9 @@ pub(super) fn literal_to_value(
         (ColumnType::Text, Literal::Text(t)) => Ok(Value::Text(t.clone())),
         (ColumnType::Varchar(_), Literal::Text(t)) => Ok(Value::Text(t.clone())),
         (ColumnType::Vector, Literal::Vector(v)) => Ok(Value::Vector(v.clone())),
-        (ColumnType::Boolean, Literal::Int(0)) => Ok(Value::Int(0)),
-        (ColumnType::Boolean, Literal::Int(1)) => Ok(Value::Int(1)),
+        (ColumnType::Boolean, Literal::Bool(b)) => Ok(Value::Bool(*b)),
+        (ColumnType::Boolean, Literal::Int(0)) => Ok(Value::Bool(false)),
+        (ColumnType::Boolean, Literal::Int(1)) => Ok(Value::Bool(true)),
         (ColumnType::Numeric, Literal::Int(i)) => Ok(Value::Int(*i)),
         (ColumnType::Date, Literal::Int(i)) => Ok(Value::Int(*i)),
         (ColumnType::Timestamp, Literal::Int(i)) => Ok(Value::Int(*i)),

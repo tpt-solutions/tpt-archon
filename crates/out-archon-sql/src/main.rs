@@ -225,6 +225,8 @@ fn display_value(val: &Value) -> String {
             let inner: Vec<String> = v.iter().map(|f| format!("{:.4}", f)).collect();
             format!("[{}]", inner.join(", "))
         }
+        // Postgres's `psql` text bool format is "t"/"f".
+        Value::Bool(b) => (if *b { "t" } else { "f" }).to_string(),
         Value::Null => "NULL".to_string(),
     }
 }

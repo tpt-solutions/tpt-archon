@@ -337,9 +337,12 @@ pub fn process_sql(raw_sql: &str) -> Result<Vec<Statement>, PgWireError> {
                 ));
             }
             NormalizedStatement::SelectConstant(sql) => {
-                // Parse as regular SELECT
-                let stmts = crate::compat::process_sql(&sql)?;
-                parsed.extend(stmts);
+                // The core parser now handles FROM-less literal SELECTs
+                // natively (`Statement::SelectLiteral`, spec fact #3), so
+                // this just needs the real parser — NOT another call into
+                // `process_sql`, which would re-classify this exact same
+                // text as `SelectConstant` again and recurse forever.
+                parsed.push(tpt_archon_relational::parser::parse_statement(&sql)?);
             }
             NormalizedStatement::Begin => {
                 parsed.push(Statement::Begin);
@@ -351,8 +354,11 @@ pub fn process_sql(raw_sql: &str) -> Result<Vec<Statement>, PgWireError> {
                 parsed.push(Statement::Rollback);
             }
             NormalizedStatement::Passthrough(sql) => {
-                let stmts = crate::compat::process_sql(&sql)?;
-                parsed.extend(stmts);
+                // Must call the real parser directly, not `process_sql` —
+                // `normalize_statement` would classify this same unchanged
+                // text as `Passthrough` again, recursing forever (this was
+                // a live bug: every ordinary SQL statement hit this path).
+                parsed.push(tpt_archon_relational::parser::parse_statement(&sql)?);
             }
         }
     }
@@ -469,6 +475,34 @@ mod tests {
             result,
             NormalizedStatement::SelectConstant("SELECT 1".to_string())
         );
+    }
+
+    #[test]
+    fn process_sql_select_const_terminates_and_parses() {
+        // Regression test: process_sql's SelectConstant arm used to recurse
+        // into itself on the exact same, unchanged text forever (infinite
+        // recursion / stack overflow for every SELECT-const health-check
+        // query sent over the wire). It must terminate and produce a real
+        // parsed Statement now.
+        let stmts = process_sql("SELECT 1").unwrap();
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Statement::SelectLiteral(_)));
+    }
+
+    #[test]
+    fn process_sql_ordinary_statement_terminates_and_parses() {
+        // Regression test: process_sql's Passthrough arm had the identical
+        // bug for every statement that isn't SET/SHOW/RESET/SELECT-const/a
+        // transaction synonym — i.e. ordinary SQL like CREATE TABLE, SELECT
+        // ... FROM ..., INSERT, etc. never actually reached the real parser
+        // and recursed on itself forever instead.
+        let stmts = process_sql("CREATE TABLE t (v INT)").unwrap();
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Statement::CreateTable(_)));
+
+        let stmts = process_sql("SELECT v FROM t").unwrap();
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Statement::Select(_)));
     }
 
     #[test]

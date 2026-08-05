@@ -69,12 +69,13 @@ instead, so publish intent is visible from the crate/directory name alone.
   adoption tool wrapping `tpt-archon-relational::database::Database`, not one
   of the layered architecture crates. Depends on `tpt-archon-relational`.
 - **out-archon-verify** — *not published* (`publish = false`); a verification
-  harness that pulls in the git-hosted ecosystem verifiers
-  (`tpt-eidos-verifier`, `tpt-telos-*`, `tpt-gpu-ir-spec`) to prove invariants
-  (B-Link node-capacity fit, WAL replay consistency, MVCC serializability)
-  against `tpt-archon-core`/`tpt-archon-relational`. Kept separate because
-  crates.io rejects git dependencies even as dev-dependencies, and this lets
-  the shippable crates stay `cargo publish --dry-run` clean (see ADR 0003).
+  harness that pulls in the ecosystem verifiers (`tpt-eidos-verifier`,
+  `tpt-telos-*`, `tpt-gpu-ir-spec`, all published to crates.io) to prove
+  invariants (B-Link node-capacity fit, WAL replay consistency, MVCC
+  serializability) against `tpt-archon-core`/`tpt-archon-relational`. A normal
+  workspace member — it isn't published for the same naming-convention reason
+  as `out-archon-sql`, not because of any dependency constraint (see ADR
+  0003 and `TODO.md` Phase 9).
 
 ### Dependency graph
 
@@ -92,9 +93,8 @@ reverse-direction dependency.
 ### TPT ecosystem crates this workspace depends on
 
 These are verification/tooling deps, pulled in only by the non-published
-`crates/out-archon-verify` harness (git deps, pinned to exact commits in that
-crate's `Cargo.toml` — bump deliberately when an upstream release is
-validated). None of them are runtime dependencies of the shippable crates.
+`crates/out-archon-verify` harness as ordinary crates.io version
+requirements. None of them are runtime dependencies of the shippable crates.
 
 - `tpt-eidos-verifier` (from the `tpt-eidos` repo) — QF_LRA decision
   procedure; proves the B-Link tree node-capacity invariant. There is **no**
@@ -115,10 +115,10 @@ validated). None of them are runtime dependencies of the shippable crates.
 
 See ADR `docs/0003-verification-tested-now-proven-later.md` for the full
 rationale: invariants are implemented and tested/proven in
-`out-archon-verify` + `formal-proofs/` now, since `tpt-eidos`/`tpt-telos`
-aren't published crates yet, and crate docs deliberately avoid repeating
-`spec.txt`'s "zero CVE / zero silent corruption" claims until real proofs
-exist.
+`out-archon-verify` + `formal-proofs/` now, since `tpt-telos` has no
+Coq/Lean backend (its codegen targets Rust/Go) regardless of publish status,
+and crate docs deliberately avoid repeating `spec.txt`'s "zero CVE / zero
+silent corruption" claims until real proofs exist.
 
 ## Testing conventions
 

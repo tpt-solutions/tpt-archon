@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 
 use super::ast::{
     AggregateFunc, CompoundStatement, Expr, FrameBound, Join, JoinType, OrderBy, OrderByCosine,
-    ParseError, SelectStatement, SetOperation, Statement, TableRef, WindowCall, WindowFrame,
-    WindowFunc, WindowSpec, CTE,
+    ParseError, SelectLiteralItem, SelectStatement, SetOperation, Statement, TableRef, WindowCall,
+    WindowFrame, WindowFunc, WindowSpec, CTE,
 };
 use super::expr::{parse_expr, parse_literal};
 use super::lexer::{
@@ -36,6 +36,47 @@ pub(super) fn parse_select_inner(ts: &mut TokenStream) -> Result<SelectStatement
     let result = parse_select_full(ts);
     ts.exit_depth();
     result
+}
+
+/// Attempts to parse a FROM-less `SELECT <literal> [AS alias], ...` (e.g.
+/// `SELECT 1`, `SELECT 'x' AS greeting`) — the common driver health-check
+/// query shape (spec fact #3: `FROM` was unconditionally mandatory, and
+/// there was no scalar-literal SELECT list at all to make `SELECT 1` work
+/// even if it were optional). Returns `None` and restores `ts`'s position
+/// if the input isn't this shape (e.g. it's a real `SELECT col FROM t`, or
+/// a literal list immediately followed by `FROM`), so the caller falls
+/// through to the normal column/FROM-based parser — this never partially
+/// commits.
+pub(super) fn try_parse_select_literal(ts: &mut TokenStream) -> Option<Vec<SelectLiteralItem>> {
+    let sp = ts.save();
+    let mut items = Vec::new();
+    loop {
+        let value = match parse_literal(ts) {
+            Ok(v) => v,
+            Err(_) => {
+                ts.restore(sp);
+                return None;
+            }
+        };
+        let alias = match parse_optional_alias(ts) {
+            Ok(a) => a,
+            Err(_) => {
+                ts.restore(sp);
+                return None;
+            }
+        };
+        items.push(SelectLiteralItem { value, alias });
+        if let Tok::Comma = ts.peek() {
+            ts.next();
+            continue;
+        }
+        break;
+    }
+    if !matches!(ts.peek(), Tok::Eof) {
+        ts.restore(sp);
+        return None;
+    }
+    Some(items)
 }
 
 /// Parses either a simple SELECT or a compound query (UNION/INTERSECT/EXCEPT).

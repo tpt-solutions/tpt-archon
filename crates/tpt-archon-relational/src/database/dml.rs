@@ -45,33 +45,39 @@ impl Database {
                 })
                 .collect::<Result<_, _>>()?
         };
-        if stmt.values.len() != cols.len() {
-            return Err(DbError::ArityMismatch);
+        for row_values in &stmt.values {
+            if row_values.len() != cols.len() {
+                return Err(DbError::ArityMismatch);
+            }
         }
-        let mut row = vec![Value::Int(0); ts.schema.columns.len()];
-        for (slot, lit) in cols.iter().zip(stmt.values.iter()) {
-            row[*slot] = literal_to_value(&ts.schema, *slot, lit)?;
+        let mut inserted = 0u64;
+        for row_values in &stmt.values {
+            let mut row = vec![Value::Int(0); ts.schema.columns.len()];
+            for (slot, lit) in cols.iter().zip(row_values.iter()) {
+                row[*slot] = literal_to_value(&ts.schema, *slot, lit)?;
+            }
+            let id = ts.next_row_id;
+            ts.next_row_id += 1;
+            if !cols.contains(&0) {
+                row[0] = Value::Int(id as i64);
+            }
+            if in_txn {
+                let txn = active_txns
+                    .iter_mut()
+                    .find(|(n, _)| n == &stmt.table)
+                    .map(|(_, t)| t)
+                    .expect("ensure_txn guarantees a transaction exists");
+                let wrapped = mvcc_wrap_row(&row);
+                ts.mvcc.write(txn, id, wrapped);
+            } else {
+                let encoded = encode_row(&row);
+                ts.tree.insert(id, encoded);
+                maintain_vector_indexes_for_row(ts, id, &row);
+                maybe_build_vector_indexes(ts)?;
+            }
+            inserted += 1;
         }
-        let id = ts.next_row_id;
-        ts.next_row_id += 1;
-        if !cols.contains(&0) {
-            row[0] = Value::Int(id as i64);
-        }
-        if in_txn {
-            let txn = active_txns
-                .iter_mut()
-                .find(|(n, _)| n == &stmt.table)
-                .map(|(_, t)| t)
-                .expect("ensure_txn guarantees a transaction exists");
-            let wrapped = mvcc_wrap_row(&row);
-            ts.mvcc.write(txn, id, wrapped);
-        } else {
-            let encoded = encode_row(&row);
-            ts.tree.insert(id, encoded);
-            maintain_vector_indexes_for_row(ts, id, &row);
-            maybe_build_vector_indexes(ts)?;
-        }
-        Ok(1)
+        Ok(inserted)
     }
 
     pub(super) fn run_update(&mut self, stmt: &UpdateStatement) -> Result<u64, DbError> {

@@ -18,6 +18,8 @@ pub enum Value {
     Text(String),
     /// A fixed-width `f32` embedding vector (the `f32[]` column type).
     Vector(Vec<f32>),
+    /// A `BOOLEAN` value.
+    Bool(bool),
     /// SQL `NULL`.
     Null,
 }
@@ -36,6 +38,7 @@ impl Ord for Value {
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
             (Value::Float(a), Value::Float(b)) => a.total_cmp(b),
             (Value::Text(a), Value::Text(b)) => a.cmp(b),
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
             (Value::Vector(a), Value::Vector(b)) => a.len().cmp(&b.len()).then_with(|| {
                 a.iter()
                     .zip(b.iter())
@@ -48,6 +51,8 @@ impl Ord for Value {
             (_, Value::Null) => core::cmp::Ordering::Less,
             (Value::Int(_), _) => core::cmp::Ordering::Less,
             (_, Value::Int(_)) => core::cmp::Ordering::Greater,
+            (Value::Bool(_), _) => core::cmp::Ordering::Less,
+            (_, Value::Bool(_)) => core::cmp::Ordering::Greater,
             (Value::Float(_), Value::Text(_)) | (Value::Float(_), Value::Vector(_)) => {
                 core::cmp::Ordering::Less
             }
@@ -176,6 +181,7 @@ pub fn literal_to_value(lit: &Literal) -> Value {
         Literal::Float(v) => Value::Float(*v),
         Literal::Text(s) => Value::Text(s.clone()),
         Literal::Vector(v) => Value::Vector(v.clone()),
+        Literal::Bool(b) => Value::Bool(*b),
         Literal::Null => Value::Null,
     }
 }

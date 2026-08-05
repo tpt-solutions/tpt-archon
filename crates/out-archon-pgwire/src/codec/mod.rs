@@ -381,6 +381,8 @@ fn encode_value(val: &Value, binary: bool) -> Vec<u8> {
                 }
                 b
             }
+            // Postgres's binary bool format is a single 0x00/0x01 byte.
+            Value::Bool(b) => vec![*b as u8],
             Value::Null => Vec::new(),
         };
     }
@@ -399,6 +401,8 @@ fn encode_value(val: &Value, binary: bool) -> Vec<u8> {
             s.push(']');
             s.into_bytes()
         }
+        // Postgres's text bool format is "t"/"f", not "true"/"false".
+        Value::Bool(b) => (if *b { "t" } else { "f" }).as_bytes().to_vec(),
         Value::Null => Vec::new(),
     }
 }

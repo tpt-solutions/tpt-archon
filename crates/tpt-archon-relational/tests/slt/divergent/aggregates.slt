@@ -1,30 +1,20 @@
-# Known AVG/SUM divergences from Postgres (spec fact #5). See ddl.slt (in
+# AVG divergence from Postgres (spec fact #5, narrowed — the empty-input
+# half and the integer-division half are both fixed now; see
+# supported/aggregates.slt for those, now-passing cases). See ddl.slt (in
 # supported/) for the corpus format convention.
 #
-# `executor::eval_aggregate` computes SUM/AVG purely over `Value::Int`,
-# with `.sum()`/integer `/` — so:
-#   1. SUM/AVG over zero matching rows returns `Value::Int(0)`, where
-#      Postgres returns SQL NULL for both.
-#   2. AVG performs integer division (`sum / count` as i64), where Postgres
-#      returns a `numeric` with a fractional part.
-# These are asserted to keep diverging; if `eval_aggregate` is ever
-# rewritten (Track A's general-scalar-`Expr` work), these tests should move
-# to supported/aggregates.slt instead of being edited in place.
-
+# `executor::eval_aggregate`'s AVG now divides as a float, so AVG(1, 2) is
+# 1.5, not 1 via truncating i64 division — that part of fact #5 is fixed.
+# What's still divergent: Postgres's `AVG(int)` always returns `numeric`, an
+# exact-precision decimal type, not `float4`/`float8` — its text form keeps
+# the full computed decimal scale (e.g. `1.5000000000000000`, not `1.5`)
+# regardless of whether the *value* now agrees. `Value::Float` doesn't
+# replicate that scale, so AVG's non-empty case stays here rather than
+# moving to supported/ — matching this file's own framing from before the
+# fix landed: a correct value was never sufficient by itself for AVG, only
+# for SUM (which doesn't have Postgres's always-`numeric` typing rule).
 statement ok
 CREATE TABLE nums (n INT)
-
-# Empty table, no GROUP BY: Postgres returns NULL for both SUM and AVG over
-# zero rows; Archon returns integer 0 for both.
-query I
-SELECT SUM(n) AS total FROM nums
-----
-0
-
-query I
-SELECT AVG(n) AS avg_n FROM nums
-----
-0
 
 statement ok
 INSERT INTO nums (n) VALUES (1)
@@ -32,35 +22,45 @@ INSERT INTO nums (n) VALUES (1)
 statement ok
 INSERT INTO nums (n) VALUES (2)
 
-# AVG(1, 2) is 1.5 in Postgres (numeric, fractional). Archon does integer
-# division (3 / 2 == 1 in i64 arithmetic) and returns a bare Int.
+# AVG(1, 2) is 1.5 in Postgres too now (value fixed) — but Postgres's
+# `numeric` text form is `1.5000000000000000` (full decimal scale), not the
+# plain `1.5` a `float4` produces, so this still can't move to supported/.
 query I
 SELECT AVG(n) AS avg_n FROM nums
 ----
-1
+1.5
 
-# --- HAVING: neither engine's accepted form is portable to the other ---
+# --- HAVING: Archon intentionally accepts a spelling Postgres rejects —
+# kept on purpose, not a bug to fix -----------------------------------------
 #
 # This is an additional divergence found while building this corpus (beyond
 # spec fact #5, which is only about SUM/AVG value semantics) — flagged here
 # since it affects HAVING generally, not just SUM/AVG:
 #
 # Archon's HAVING clause is parsed as an ordinary predicate over the
-# GROUP BY's *output* row, so it can only reference the exact alias a SELECT
-# list aggregate was given — a raw aggregate call in HAVING re-parses as a
-# plain column reference named after the aggregate's default (unaliased)
-# tag (`agg_default_alias`, e.g. `COUNT(*)` -> a lookup for a column
-# literally named "count"), which doesn't exist in the aggregated output
-# row and fails with `UnknownColumn`. Real Postgres requires the opposite:
-# per standard SQL logical query processing order, HAVING is evaluated
-# *before* the SELECT list's output aliases exist, so `HAVING cnt >= 2`
-# errors in Postgres ("column \"cnt\" does not exist") unless `cnt` happens
-# to already be a real column/table alias — you must write the raw
-# aggregate expression, `HAVING COUNT(*) >= 2`. (Postgres does extend GROUP
-# BY and ORDER BY to accept output aliases, which is why fact #8's example
-# `ORDER BY dept` style corpus entries work fine on both engines — but that
-# extension does not cover HAVING.) The upshot: there is no single HAVING
-# spelling this corpus can put in supported/ today.
+# GROUP BY's *output* row, so it can reference the exact alias a SELECT
+# list aggregate was given (`HAVING cnt >= 2`) — real Postgres requires the
+# opposite: per standard SQL logical query processing order, HAVING is
+# evaluated *before* the SELECT list's output aliases exist, so
+# `HAVING cnt >= 2` errors in Postgres ("column \"cnt\" does not exist")
+# unless `cnt` happens to already be a real column/table alias — you must
+# write the raw aggregate expression, `HAVING COUNT(*) >= 2`. (Postgres does
+# extend GROUP BY and ORDER BY to accept output aliases, which is why fact
+# #8's example `ORDER BY dept` style corpus entries work fine on both
+# engines — but that extension does not cover HAVING.)
+#
+# Decision (2026-08-04): keep Archon's behavior as-is. Archon accepts BOTH
+# spellings — the alias form Postgres rejects, AND the raw-aggregate form
+# Postgres requires (see the two passing queries below) — so nothing here
+# is broken; it's a deliberate superset, not a gap. "Fixing" it would mean
+# *removing* working functionality (rejecting the alias form) purely to
+# match Postgres's stricter rule, which is a straight usability regression
+# with no correctness upside — arguably better than Postgres, not worse.
+# Only reason to revisit: if byte-identical Postgres error behavior (not
+# just query results) ever becomes a hard requirement for Track C. Until
+# then, there is no single HAVING spelling this corpus can put in
+# supported/ (Postgres rejects one of the two forms Archon accepts), which
+# is a documentation fact about the comparison corpus, not a defect here.
 
 statement ok
 CREATE TABLE div_employees (dept TEXT, salary INT)

@@ -308,6 +308,7 @@ impl Database {
         let rs = self.execute_in_session(session_id, stmt, params)?;
         let tag = match stmt {
             Statement::Select(_) => CommandTag::Select(rs.rows.len() as u64),
+            Statement::SelectLiteral(_) => CommandTag::Select(rs.rows.len() as u64),
             Statement::Insert(_) => CommandTag::Insert(rs.affected.unwrap_or(0)),
             Statement::Update(_) => CommandTag::Update(rs.affected.unwrap_or(0)),
             Statement::Delete(_) => CommandTag::Delete(rs.affected.unwrap_or(0)),
@@ -376,6 +377,22 @@ impl Database {
     pub fn execute(&mut self, stmt: &Statement, params: &[Vec<f32>]) -> Result<ResultSet, DbError> {
         match stmt {
             Statement::Select(s) => self.run_select(s, params),
+            Statement::SelectLiteral(items) => {
+                let mut columns = Vec::with_capacity(items.len());
+                let mut row = Vec::with_capacity(items.len());
+                for item in items {
+                    // Postgres names an unaliased scalar SELECT-list
+                    // expression "?column?"; match that so a driver
+                    // health-check query's RowDescription looks the same.
+                    columns.push(item.alias.clone().unwrap_or_else(|| "?column?".to_string()));
+                    row.push(crate::executor::literal_to_value(&item.value));
+                }
+                Ok(ResultSet {
+                    columns,
+                    rows: vec![row],
+                    affected: None,
+                })
+            }
             Statement::Insert(i) => {
                 let affected = self.run_insert_stmt(i)?;
                 Ok(ResultSet {
@@ -459,6 +476,7 @@ impl Database {
     ) -> Result<(ResultSet, CommandTag), DbError> {
         let tag = match stmt {
             Statement::Select(_) => CommandTag::Select(0),
+            Statement::SelectLiteral(_) => CommandTag::Select(0),
             Statement::Insert(_) => CommandTag::Insert(0),
             Statement::Update(_) => CommandTag::Update(0),
             Statement::Delete(_) => CommandTag::Delete(0),

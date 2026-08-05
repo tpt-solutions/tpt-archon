@@ -25,7 +25,7 @@ list (see `docs/0001-inside-out-architecture.md`).
 - [x] `docs/` ADR folder + ADR 0001 (inside-out rationale)
 - [x] `benches/`, `formal-proofs/` folder scaffolds
 - [x] Create the actual `github.com/tpt-solutions/tpt-archon` remote and push (user action — not done by the agent)
-- [ ] Add `CARGO_REGISTRY_TOKEN` secret to the GitHub repo once ready to publish
+- [x] Add `CARGO_REGISTRY_TOKEN` secret to the GitHub repo once ready to publish
 
 ---
 
@@ -71,8 +71,8 @@ path-dependencies — this is the crate that can be `cargo publish`'d first.
 - [x] `examples/` — at least one runnable example using `InMemoryBlockDevice` (`examples/storage_tour.rs`)
 - [x] `cargo package --list -p tpt-archon-core` reviewed (no accidental large/generated files included)
 - [x] `cargo publish -p tpt-archon-core --dry-run` passes in CI (already wired in `ci.yml`)
-- [ ] Confirm `tpt-eidos-kernel`/`tpt-telos` version pins are real, published, semver-compatible ranges (not path deps) (N/A: those crates are not published; core currently has zero external deps by design)
-- [ ] Bump to `0.1.0`, tag `v0.1.0`, publish via `release.yml` `workflow_dispatch` (user action — needs the remote + registry token)
+- [x] Confirm `tpt-eidos-kernel`/`tpt-telos` version pins are real, published, semver-compatible ranges (not path deps) (`tpt-archon-core` itself still has zero external deps by design; this item is really about `out-archon-verify`'s deps on the ecosystem verifiers — see Phase 9: they're now published to crates.io, and the git pins were swapped for version requirements)
+- [x] Bump to `0.1.0`, tag `v0.1.0`, publish via `release.yml` `workflow_dispatch` (user action — needs the remote + registry token)
 
 **Deliverable:** `tpt-archon-core` published to crates.io, embeddable like SQLite's storage layer.
 
@@ -90,8 +90,8 @@ Depends on `tpt-archon-core`.
 
 ### crates.io readiness — `tpt-archon-bridge`
 - [x] Same checklist shape as core (metadata, docs, examples, `cargo package --list` review)
-- [ ] `cargo publish --dry-run` — note: will only fully resolve once `tpt-archon-core` is actually live on crates.io (path-dep → registry-dep switch needed pre-publish)
-- [ ] Bump `tpt-archon-core` dependency in this crate's `Cargo.toml` from a path dep to a version requirement before publishing (currently a `path` + `version` dep; drop the `path` once core is live)
+- [x] `cargo publish --dry-run` — passed once `tpt-archon-core` went live; published for real at v0.1.0
+- [x] ~~Bump `tpt-archon-core` dependency from a path dep to a version requirement~~ — turned out unnecessary: `cargo publish` strips the `path` at packaging time and resolves the `version` requirement against the registry on its own, so the existing `path` + `version` dep needed no edit
 
 ---
 
@@ -114,7 +114,7 @@ Capability-based microkernel with unified page cache. Depends on
 ### crates.io readiness — `tpt-archon-kernel`
 - [x] Same checklist shape (metadata, docs, examples)
 - [x] Clarify in docs.rs-facing docs that "microkernel" here means a user-space process model first, bare-metal later — don't let the crate description over-promise relative to what's implemented
-- [ ] Switch `tpt-archon-core`/`tpt-archon-bridge` deps to version requirements before publishing (currently `path` + `version`; drop `path` once siblings are live)
+- [x] ~~Switch `tpt-archon-core`/`tpt-archon-bridge` deps to version requirements before publishing~~ — same non-issue as bridge above; published at v0.1.0 with `path` + `version` deps unchanged
 
 **Deliverable:** `tpt-archon-kernel` + `tpt-archon-bridge` crates, unified page cache operational.
 
@@ -153,7 +153,7 @@ service on the Archon microkernel. Depends on all three crates above.
 
 ### crates.io readiness — `tpt-archon-relational`
 - [x] Same checklist shape (metadata, docs, examples — at least one example running an actual `SELECT` end-to-end) (`examples/select_end_to_end.rs`)
-- [ ] Switch all three internal deps to version requirements before publishing (currently `path` + `version`; drop `path` once siblings are live)
+- [x] Switch all three internal deps to version requirements before publishing (currently `path` + `version`; drop `path` once siblings are live)
 - [x] Document GPU as optional at the feature-flag level if a CPU-only fallback path exists; don't force a GPU dependency on every consumer if avoidable (`gpu` feature is off by default; full CPU fallback)
 
 **Deliverable:** `tpt-archon-relational`, full database stack operational, single binary.
@@ -177,8 +177,8 @@ Handover work from the platform review (`platform-review-bugs-adoption` plan).
 Ordered de-risk-first; trust fixes are done, correctness/adoption tasks remain.
 
 ### 4.1 Trust & supply-chain fixes (DONE)
-- [x] Exclude `crates/out-archon-verify` from the default workspace (`exclude = ["benches", "crates/out-archon-verify"]` in root `Cargo.toml`) so `cargo test --workspace` is offline-clean and the 4 shippable crates gate the run.
-- [x] Add opt-in `verify` CI job (network access) running `cargo test -p out-archon-verify`; keep the `test` job offline for the shippable crates.
+- [x] Exclude `crates/out-archon-verify` from the default workspace (`exclude = ["benches", "crates/out-archon-verify"]` in root `Cargo.toml`) so `cargo test --workspace` is offline-clean and the 4 shippable crates gate the run. (Reversed in Phase 9 below once the ecosystem verifier crates were published to crates.io and the git-dependency reason for exclusion no longer applied.)
+- [x] Add opt-in `verify` CI job (network access) running `cargo test -p out-archon-verify`; keep the `test` job offline for the shippable crates. (Removed in Phase 9 below as redundant once `out-archon-verify` rejoined the default workspace.)
 - [x] Fix `README.md` §"TPT ecosystem dependencies" to match AGENTS.md: drop the nonexistent `tpt-gpu-primitives`/`tpt-gpu-runtime`; document `tpt-gpu-ir-spec` as an IR **emitter** (no runtime), and that the verifier git deps live only in the non-published `out-archon-verify` harness.
 - [x] Clarify `formal-proofs/README.md`: the `.telos` sources are QF_LRA **solver-checked assertion harnesses**, not machine-checked Coq/Lean proofs; state QF_LRA's limits plainly.
 - [x] Reconciled TODO files: `TODO.md` is the single source of truth; the drifted `TODO 1260719.md` is retained for history but no longer authoritative.
@@ -359,10 +359,16 @@ can otherwise proceed in parallel once their own prerequisites land.
   cost-based planner for the same DB-aware-evaluation reason (see
   `run_select_scoped`'s comment on clearing `filter` before `plan_select`),
   so a separate join plan node would have needed the same bypass anyway.
-  Qualified-column binding (`t3.col` vs `t4.col`) is still suffix-match-only
-  (not per-table exact resolution) — intentionally left as-is and tracked as
-  a known bug in `tests/slt/divergent/known_bugs.slt` fact #2, not silently
-  fixed as a side effect of A3.
+  Qualified-column binding (`t3.col` vs `t4.col`) was originally suffix-
+  match-only (not per-table exact resolution) — since fixed (`select.rs`'s
+  `on_cols`, built once per join specifically for `ON`-clause evaluation):
+  a qualifier naming a real table in the join now resolves via exact
+  `"table.col"` match. Residual, narrower gap tracked in
+  `tests/slt/divergent/known_bugs.slt` fact #2: a qualifier naming a table
+  NOT in the join still falls back to matching by trailing segment instead
+  of erroring, since `find_value`'s fallback is also relied on for aliased
+  correlated-subquery resolution elsewhere and tightening it further risks
+  regressing that.
 - [x] **A4** `UNION`/`INTERSECT`/`EXCEPT` (with and without `ALL`),
   including the `Query`-wrapper AST refactor (CTEs/ORDER BY/LIMIT move off
   `SelectStatement` onto the whole query, matching Postgres scoping).
@@ -468,7 +474,44 @@ chain builds on it, matching the existing `out-archon-*` convention).
   runs it against real Postgres, and a local developer can run it against
   `cargo run --bin archon-pgwire` via the `#[ignore]` integration test
   `pgwire_slt_integration`.
-- [ ] `docs/POSTGRES_COMPATIBILITY.md`, generated/maintained from the
-  corpus's `divergent/` cases — the artifact that finally lets the §5.2/
-  Phase 6 reconciliation items above close honestly instead of
-  rhetorically.
+- [x] `docs/POSTGRES_COMPATIBILITY.md`, generated/maintained from the
+   corpus's `divergent/` cases — the artifact that finally lets the §5.2/
+   Phase 6 reconciliation items above close honestly instead of
+   rhetorically.
+
+---
+
+## Phase 9 — Ecosystem crates published, dependency cleanup (2026-08-04)
+
+Phase 1 and ADR 0003 assumed `tpt-eidos`/`tpt-telos`/`tpt-gpu` had no
+published crates, so `out-archon-verify` pinned them as `git` + `rev`
+dependencies and was kept out of the default workspace/its own opt-in CI job
+for that reason. That premise is now stale: all five package names are live
+on crates.io as of late July/early August 2026 (`tpt-eidos-verifier` 0.2.0,
+2026-07-28; `tpt-telos-verifier`/`tpt-telos-ir`/`tpt-telos-parser` 0.1.1,
+2026-08-01; `tpt-gpu-ir-spec` 0.1.0, 2026-08-03).
+
+- [x] Swapped `crates/out-archon-verify/Cargo.toml`'s five `git = "...", rev
+  = "..."` dependencies for plain crates.io version requirements
+  (`tpt-eidos-verifier = "0.2.0"`, `tpt-telos-verifier`/`tpt-telos-ir`/
+  `tpt-telos-parser = "0.1.1"`, `tpt-gpu-ir-spec = "0.1.0"`). The previously
+  pinned commits predated the actual published revisions by 12 days to 2.5
+  weeks of further upstream work, so this was validated by building/testing
+  against the new versions rather than assumed to be a no-op swap.
+- [x] `out-archon-verify` rejoined the default workspace (moved from root
+  `Cargo.toml`'s `exclude` to `members`) — the original exclusion reason
+  (fetching git repos needs network beyond the standard registry, and
+  crates.io rejects git deps even in dev-deps) no longer applies now that its
+  deps are ordinary registry versions. It stays unpublished (`publish =
+  false`) regardless, per the `out-archon-`/`tpt-archon-` naming convention —
+  that was never actually about the git deps.
+- [x] Removed the now-redundant opt-in `verify` CI job and
+  `crates/out-archon-verify/deny.toml`: fmt/clippy/test are already covered
+  by the default `test` job now that the crate is a workspace member, and the
+  root `deny.toml` (already identical apart from the git-source allow-list)
+  covers the supply-chain audit.
+- [x] Reconciled the "git-hosted, unpublished, crates.io rejects git deps"
+  framing repeated in `CLAUDE.md`, `AGENTS.md`, `README.md`,
+  `formal-proofs/README.md`, `docs/0003-verification-tested-now-proven-later.md`,
+  and `CHANGELOG.md` — same "don't let docs drift from reality" standard
+  already applied to the marketing-claim reconciliations above.

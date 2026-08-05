@@ -16,8 +16,9 @@ Postgres client — `psql`, drivers, ORMs — can talk to Archon directly (see
 [Connect with a Postgres client](#connect-with-a-postgres-client) below);
 its wire-level behavior is checked against real Postgres by a comparison
 suite (`out-archon-pgcompat`, Phase 8 Track C). External verification crates
-(`tpt-eidos-verifier`, `tpt-telos-*`, `tpt-gpu-ir-spec`) are wired in via the
-non-published `crates/out-archon-verify` harness, not the shippable crates. GPU support is
+(`tpt-eidos-verifier`, `tpt-telos-*`, `tpt-gpu-ir-spec`, all published to
+crates.io) are wired in via the non-published `crates/out-archon-verify`
+harness, not the shippable crates. GPU support is
 IR-emission only (no runtime). A real Linux `io_uring` backend exists behind
 an opt-in feature (`tpt-archon-kernel`'s `io-uring-backend`), and a real,
 cross-platform, read-only `mmap` zero-copy path exists behind another
@@ -66,10 +67,9 @@ verification tooling from scratch:
   for an external GPU backend; the CPU `vector_topk` remains the real executor.
 
 These are verification/tooling deps, **not** runtime deps. None of them are
-pulled into the shippable crates (which must stay `cargo publish`-dry-run
-clean — crates.io rejects git deps even in dev-deps). They live exclusively in
-the non-published `crates/out-archon-verify` harness. See AGENTS.md and ADR
-0003.
+pulled into the shippable crates. They live exclusively in the non-published
+`crates/out-archon-verify` harness, as ordinary published crates.io version
+requirements. See AGENTS.md and ADR 0003.
 
 There is no `tpt-zero-bytes` crate (referenced in the original design doc but
 never built anywhere in the ecosystem); the zero-allocation I/O primitives
