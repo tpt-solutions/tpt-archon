@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+### Changed
+### Fixed
+
+## [0.1.0] - 2026-08-05
+
+### Added
 - `docs/POSTGRES_COMPATIBILITY.md` — honest PostgreSQL divergence catalog
   generated from `tests/slt/divergent/` (Phase 8 / Track C). Closes the §5.2 /
   Phase 6 reconciliation items with a machine-tracked artifact instead of
@@ -52,6 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   storage and query hot paths and vector search.
 - Docs: ADR 0002 (zero-allocation primitives in-crate) and ADR 0003 (verification
   tested-now-proven-later); `formal-proofs/README.md` tracking intended proof targets.
+- `tpt-archon-core`: `storage` module — `StorageEngine` facade wiring `BufferPool`
+  + `Wal` with write-ahead (WAL record before page) and `recover()` replaying
+  committed page images after a crash; plus a file-backed `Database::open`/`create`
+  convenience (`std` feature).
+- `tpt-archon-core`: B-Link property tests forcing ≥2 interior levels (sequential /
+  reverse / shuffled insert orders) with full-key lookup assertions.
+- `tpt-archon-relational`: `explain` module — `explain_plan` (always) renders the
+  physical plan + dispatch; `explain_gpu` (gated on the `gpu` feature) prints the
+  emitted TPTIR for a GPU-dispatched scan.
 
 ### Changed
 - `out-archon-verify` (formerly `tpt-archon-verify`; renamed to carry the
@@ -70,14 +85,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opt-in `verify` CI job and its dedicated `deny.toml` were removed (see
   `TODO.md` Phase 9). It remains unpublished (`publish = false`) per the
   `out-archon-` naming convention, unrelated to this change.
-
-### Added
-- `tpt-archon-core`: `storage` module — `StorageEngine` facade wiring `BufferPool`
-  + `Wal` with write-ahead (WAL record before page) and `recover()` replaying
-  committed page images after a crash; plus a file-backed `Database::open`/`create`
-  convenience (`std` feature).
-- `tpt-archon-core`: B-Link property tests forcing ≥2 interior levels (sequential /
-  reverse / shuffled insert orders) with full-key lookup assertions.
-- `tpt-archon-relational`: `explain` module — `explain_plan` (always) renders the
-  physical plan + dispatch; `explain_gpu` (gated on the `gpu` feature) prints the
-  emitted TPTIR for a GPU-dispatched scan.

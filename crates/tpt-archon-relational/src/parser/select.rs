@@ -4,13 +4,14 @@
 //! sources.
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use super::ast::{
-    AggregateFunc, CompoundStatement, Expr, FrameBound, Join, JoinType, OrderBy, OrderByCosine,
-    ParseError, SelectLiteralItem, SelectStatement, SetOperation, Statement, TableRef, WindowCall,
-    WindowFrame, WindowFunc, WindowSpec, CTE,
+    AggregateFunc, CompoundStatement, Expr, FrameBound, FrameKind, Join, JoinType, OrderBy,
+    OrderByCosine, ParseError, SelectLiteralItem, SelectStatement, SetOperation, Statement,
+    TableRef, WindowCall, WindowFrame, WindowFunc, WindowSpec, CTE,
 };
 use super::expr::{parse_expr, parse_literal};
 use super::lexer::{
@@ -20,6 +21,15 @@ use super::lexer::{
 // ---------------------------------------------------------------------------
 // SELECT
 // ---------------------------------------------------------------------------
+
+/// Maximum value accepted for `LIMIT` (and `ORDER BY cosine(...) LIMIT k`).
+///
+/// Rejecting oversized limits at parse time caps the size of the result set
+/// the executor must materialize — important now that a PostgreSQL wire-protocol
+/// server (`out-archon-pgwire`) can issue arbitrary `LIMIT`s over a network,
+/// where an unbounded `LIMIT` is a memory-exhaustion DoS. This is a
+/// memory-safety cap, not a semantic limit, and may be raised as needed.
+pub const MAX_LIMIT: u64 = 1_000_000;
 
 /// Parses a complete SELECT (core + optional tail). Used for simple SELECT
 /// statements and for subqueries.
@@ -497,12 +507,13 @@ fn parse_window_spec(ts: &mut TokenStream) -> Result<WindowSpec, ParseError> {
     let frame = if let Tok::Ident(kw) = ts.peek() {
         if eq_ignore_case(&kw, "rows") {
             ts.next();
-            Some(parse_window_frame(ts)?)
-        } else if eq_ignore_case(&kw, "range") || eq_ignore_case(&kw, "groups") {
+            Some(parse_window_frame(ts, FrameKind::Rows)?)
+        } else if eq_ignore_case(&kw, "range") {
+            ts.next();
+            Some(parse_window_frame(ts, FrameKind::Range)?)
+        } else if eq_ignore_case(&kw, "groups") {
             return Err(ParseError(
-                "RANGE/GROUPS window frames are not supported (ROWS with numeric offsets \
-                 only)"
-                    .to_string(),
+                "GROUPS window frames are not supported (RANGE/ROWS only)".to_string(),
             ));
         } else {
             None
@@ -519,21 +530,22 @@ fn parse_window_spec(ts: &mut TokenStream) -> Result<WindowSpec, ParseError> {
     })
 }
 
-/// Parses a `ROWS` frame body (the `ROWS` keyword already consumed): either
+/// Parses a frame body (the `ROWS`/`RANGE` keyword already consumed): either
 /// `BETWEEN <bound> AND <bound>` or a single `<bound>` (meaning
 /// `BETWEEN <bound> AND CURRENT ROW`, matching Postgres's shorthand form).
-fn parse_window_frame(ts: &mut TokenStream) -> Result<WindowFrame, ParseError> {
+fn parse_window_frame(ts: &mut TokenStream, kind: FrameKind) -> Result<WindowFrame, ParseError> {
     if let Tok::Ident(kw) = ts.peek() {
         if eq_ignore_case(&kw, "between") {
             ts.next();
             let start = parse_frame_bound(ts)?;
             expect_kw(ts, "and")?;
             let end = parse_frame_bound(ts)?;
-            return Ok(WindowFrame { start, end });
+            return Ok(WindowFrame { kind, start, end });
         }
     }
     let start = parse_frame_bound(ts)?;
     Ok(WindowFrame {
+        kind,
         start,
         end: FrameBound::CurrentRow,
     })
@@ -621,6 +633,11 @@ fn parse_select_tail(
                             expect_tok(ts, Tok::RParen, "')' after cosine(...)")?;
                             expect_kw(ts, "limit")?;
                             let k = expect_int(ts, "LIMIT k")?;
+                            if k as u64 > MAX_LIMIT {
+                                return Err(ParseError(format!(
+                                    "LIMIT {k} exceeds maximum of {MAX_LIMIT}"
+                                )));
+                            }
                             *order_by_cosine = Some(OrderByCosine {
                                 column,
                                 param: 1,
@@ -682,7 +699,15 @@ fn parse_select_tail(
                     return Err(ParseError("duplicate LIMIT".to_string()));
                 }
                 match ts.next() {
-                    Tok::Int(v) if v >= 0 => *limit = Some(v as u64),
+                    Tok::Int(v) if v >= 0 => {
+                        let k = v as u64;
+                        if k > MAX_LIMIT {
+                            return Err(ParseError(format!(
+                                "LIMIT {k} exceeds maximum of {MAX_LIMIT}"
+                            )));
+                        }
+                        *limit = Some(k);
+                    }
                     _ => return Err(ParseError("expected non-negative LIMIT".to_string())),
                 }
             }

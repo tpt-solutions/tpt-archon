@@ -238,12 +238,26 @@ pub enum FrameBound {
     UnboundedFollowing,
 }
 
-/// A `ROWS BETWEEN <start> AND <end>` window frame (numeric offsets only).
-/// `RANGE`/`GROUPS` frames are rejected at parse time
-/// (`parser::select::parse_window_spec`) rather than silently mistreated as
-/// `ROWS`.
+/// Whether a window frame's bounds are counted in physical rows (`Rows`) or
+/// in `ORDER BY` value space (`Range`). `Range` groups tied `ORDER BY` values
+/// into a single peer group (matching Postgres), so e.g. a default
+/// `UNBOUNDED PRECEDING .. CURRENT ROW` frame sums all rows whose `ORDER BY`
+/// value ties the current row — not just the current physical row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameKind {
+    /// Bounds count physical rows (the historical Archon behavior).
+    Rows,
+    /// Bounds count in `ORDER BY` value space; tied values are peers.
+    Range,
+}
+
+/// A window frame: a [`FrameKind`] plus a starting and ending [`FrameBound`].
+/// `RANGE` frames with numeric offsets require exactly one `ORDER BY` column;
+/// `GROUPS` frames are still rejected at parse time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowFrame {
+    /// The frame's kind (`Rows` or `Range`).
+    pub kind: FrameKind,
     /// The frame's starting bound.
     pub start: FrameBound,
     /// The frame's ending bound.
@@ -257,13 +271,12 @@ pub struct WindowSpec {
     pub partition_by: Vec<String>,
     /// `ORDER BY` columns within each partition.
     pub order_by: Vec<OrderBy>,
-    /// Explicit `ROWS BETWEEN ...` frame. When `None`, the default applies:
+    /// Explicit `ROWS`/`RANGE` frame. When `None`, the default applies:
     /// the whole partition if `order_by` is empty, otherwise
-    /// `UNBOUNDED PRECEDING .. CURRENT ROW` (a `ROWS`-only approximation of
-    /// Postgres's default `RANGE` frame — ties in `order_by` are not given
-    /// the same peer-group treatment real `RANGE` semantics would give them).
-    /// Only meaningful for [`WindowFunc::Agg`]; ranking/`LAG`/`LEAD`
-    /// functions ignore the frame entirely, per the SQL standard.
+    /// `UNBOUNDED PRECEDING .. CURRENT ROW` as a `RANGE` frame — so tied
+    /// `ORDER BY` values are grouped into a single peer (matching Postgres;
+    /// the old `ROWS`-only approximation treated each physical row
+    /// independently and silently mis-summed ties).
     pub frame: Option<WindowFrame>,
 }
 

@@ -220,6 +220,7 @@ impl Database {
                         &ts.schema.columns,
                         &cache,
                         &mut 0usize,
+                        &[],
                     )?
                     .unwrap_or(false),
             };

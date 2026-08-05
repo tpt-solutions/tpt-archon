@@ -395,6 +395,88 @@ fn commit_applies_writes_made_during_transaction() {
 }
 
 #[test]
+fn commit_applies_writes_across_two_tables() {
+    // Structural regression for cross-table COMMIT atomicity: the two-phase
+    // (validate-all-then-apply-all) commit must still apply every table's
+    // buffered writes on success — not just the first one it touches.
+    let mut d = Database::empty();
+    d.execute(&parse_statement("CREATE TABLE t1 (id INT, v INT)").unwrap(), &[])
+        .unwrap();
+    d.execute(&parse_statement("CREATE TABLE t2 (id INT, v INT)").unwrap(), &[])
+        .unwrap();
+    d.execute(&parse_statement("BEGIN").unwrap(), &[]).unwrap();
+    d.execute(
+        &parse_statement("INSERT INTO t1 (id, v) VALUES (1, 10)").unwrap(),
+        &[],
+    )
+    .unwrap();
+    d.execute(
+        &parse_statement("INSERT INTO t2 (id, v) VALUES (1, 20)").unwrap(),
+        &[],
+    )
+    .unwrap();
+    d.execute(&parse_statement("COMMIT").unwrap(), &[]).unwrap();
+
+    let r1 = d
+        .execute(&parse_statement("SELECT v FROM t1").unwrap(), &[])
+        .unwrap();
+    let r2 = d
+        .execute(&parse_statement("SELECT v FROM t2").unwrap(), &[])
+        .unwrap();
+    assert_eq!(r1.rows.len(), 1);
+    assert_eq!(r1.rows[0][0], Value::Int(10));
+    assert_eq!(r2.rows.len(), 1);
+    assert_eq!(r2.rows[0][0], Value::Int(20));
+}
+
+#[test]
+fn limit_exceeding_maximum_is_rejected() {
+    // Network-facing LIMITs (e.g. via the pgwire server) must be bounded to
+    // avoid materializing an unbounded result set. The cap is enforced at
+    // parse time (1_000_000 = MAX_LIMIT).
+    let mut d = Database::empty();
+    d.execute(&parse_statement("CREATE TABLE t (id INT)").unwrap(), &[])
+        .unwrap();
+    let too_big = format!("SELECT * FROM t LIMIT {}", 1_000_001);
+    assert!(d.execute(&parse_statement(&too_big).unwrap(), &[]).is_err());
+    // Exactly the cap (and one below) still parses and runs.
+    let at_cap = format!("SELECT * FROM t LIMIT {}", 1_000_000);
+    assert!(d.execute(&parse_statement(&at_cap).unwrap(), &[]).is_ok());
+}
+
+#[test]
+fn qualified_column_with_unknown_table_errors() {
+    // Regression for divergent/known_bugs.slt fact #2: a qualified name whose
+    // qualifier names no table in the join must error, not silently resolve to
+    // a same-suffix column.
+    let mut d = Database::empty();
+    d.execute(&parse_statement("CREATE TABLE t3 (v INT)").unwrap(), &[])
+        .unwrap();
+    d.execute(&parse_statement("CREATE TABLE t4 (v INT)").unwrap(), &[])
+        .unwrap();
+    d.execute(&parse_statement("INSERT INTO t3 (v) VALUES (1)").unwrap(), &[])
+        .unwrap();
+    d.execute(&parse_statement("INSERT INTO t4 (v) VALUES (1)").unwrap(), &[])
+        .unwrap();
+
+    let r = d.execute(
+        &parse_statement("SELECT v FROM t3 JOIN t4 ON bogus.v = t4.v").unwrap(),
+        &[],
+    );
+    assert!(matches!(r, Err(DbError::UnknownColumn(_))));
+
+    // A valid qualified reference still resolves.
+    let ok = d
+        .execute(
+            &parse_statement("SELECT v FROM t3 JOIN t4 ON t3.v = t4.v").unwrap(),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(ok.rows.len(), 1);
+    assert_eq!(ok.rows[0][0], Value::Int(1));
+}
+
+#[test]
 fn reads_within_transaction_see_own_writes() {
     let mut d = db();
     d.execute(&parse_statement("BEGIN").unwrap(), &[]).unwrap();

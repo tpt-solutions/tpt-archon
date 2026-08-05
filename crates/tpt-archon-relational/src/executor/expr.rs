@@ -20,30 +20,39 @@ use super::value::{literal_to_value, ExecError, Value};
 /// Column names may be table-qualified (e.g. `"t.id"`) or unqualified
 /// (`"id"`). For qualified names, an exact match is tried first; if that
 /// fails the qualifier is stripped and any column whose unqualified part
-/// matches is accepted (for backwards compatibility with code that stores
-/// unqualified names). For unqualified names, a plain match is tried; if
-/// that fails, every column that contains the name after its last `.` is
-/// checked (so `"id"` matches `"t.id"`).
+/// matches is accepted — *but only when the qualifier names a real table or
+/// alias in scope* (`valid_qualifiers`). Otherwise an unrecognized qualifier
+/// (e.g. `bogus.v`) would silently resolve to any same-suffix column, which
+/// is a correctness bug (see `tests/slt/divergent/known_bugs.slt` fact #2,
+/// now fixed). `valid_qualifiers` being empty means "no qualifier
+/// information available" and preserves the historical suffix-fallback
+/// behavior (used by call sites that don't track table aliases). The
+/// exact-match path against `outer` scopes is unaffected, so correlated
+/// subquery resolution still works.
 pub(crate) fn find_value<'a>(
     name: &str,
     columns: &[String],
     row: &'a [Value],
     outer: &[(&[String], &'a [Value])],
+    valid_qualifiers: &[&str],
 ) -> Option<&'a Value> {
     if let Some(idx) = columns.iter().position(|c| c == name) {
         return Some(&row[idx]);
     }
     if name.contains('.') {
-        if columns.iter().any(|c| c == name) {
-            return Some(&row[columns.iter().position(|c| c == name).unwrap()]);
-        } else {
-            for (ocols, orow) in outer {
-                if let Some(idx) = ocols.iter().position(|c| c == name) {
-                    return Some(&orow[idx]);
-                }
+        for (ocols, orow) in outer {
+            if let Some(idx) = ocols.iter().position(|c| c == name) {
+                return Some(&orow[idx]);
             }
         }
-        let stripped = &name[name.rfind('.')? + 1..];
+        let dot = name.rfind('.')?;
+        let qualifier = &name[..dot];
+        let stripped = &name[dot + 1..];
+        // Reject a qualified name whose qualifier isn't a known table/alias
+        // rather than silently suffix-matching a spurious column.
+        if !valid_qualifiers.is_empty() && !valid_qualifiers.iter().any(|q| *q == qualifier) {
+            return None;
+        }
         if let Some(idx) = columns
             .iter()
             .position(|c| c.rfind('.').map_or(c.as_str(), |i| &c[i + 1..]) == stripped)
@@ -78,8 +87,13 @@ pub(crate) fn find_value<'a>(
 }
 
 /// Evaluate an `Expr` against a row with the given column names.
-pub fn eval_expr(expr: &Expr, columns: &[String], row: &[Value]) -> Result<bool, ExecError> {
-    match eval_expr_scoped(expr, columns, row, &[])? {
+pub fn eval_expr(
+    expr: &Expr,
+    columns: &[String],
+    row: &[Value],
+    valid_qualifiers: &[&str],
+) -> Result<bool, ExecError> {
+    match eval_expr_scoped(expr, columns, row, &[], valid_qualifiers)? {
         Some(b) => Ok(b),
         None => Ok(false),
     }
@@ -91,6 +105,9 @@ pub fn eval_expr(expr: &Expr, columns: &[String], row: &[Value]) -> Result<bool,
 /// Returns `Ok(Some(true))` / `Ok(Some(false))` / `Ok(None)` where `None`
 /// represents SQL `NULL` in a boolean context (Kleene three-valued logic).
 ///
+/// `valid_qualifiers` restricts qualified-name suffix fallback to real
+/// tables/aliases in scope (see [`find_value`]).
+///
 /// `Exists`/`InSubquery`/`ScalarCmp` need database access to run their inner
 /// query and are never evaluated here — [`crate::database::Database`]
 /// intercepts and resolves them before any leaf node reaches this function.
@@ -99,10 +116,11 @@ pub fn eval_expr_scoped(
     columns: &[String],
     row: &[Value],
     outer: &[(&[String], &[Value])],
+    valid_qualifiers: &[&str],
 ) -> Result<Option<bool>, ExecError> {
     match expr {
         Expr::Cmp { column, op, value } => {
-            let v = find_value(column, columns, row, outer)
+            let v = find_value(column, columns, row, outer, valid_qualifiers)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
             let rhs = literal_to_value(value);
             match (v, &rhs) {
@@ -115,9 +133,9 @@ pub fn eval_expr_scoped(
             }
         }
         Expr::CmpColumn { left, op, right } => {
-            let lv = find_value(left, columns, row, outer)
+            let lv = find_value(left, columns, row, outer, valid_qualifiers)
                 .ok_or_else(|| ExecError::UnknownColumn(left.clone()))?;
-            let rv = find_value(right, columns, row, outer)
+            let rv = find_value(right, columns, row, outer, valid_qualifiers)
                 .ok_or_else(|| ExecError::UnknownColumn(right.clone()))?;
             match (lv, rv) {
                 (Value::Null, _) | (_, Value::Null) => Ok(None),
@@ -129,13 +147,13 @@ pub fn eval_expr_scoped(
             }
         }
         Expr::IsNull { column, negated } => {
-            let v = find_value(column, columns, row, outer)
+            let v = find_value(column, columns, row, outer, valid_qualifiers)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
             let is_null = matches!(v, Value::Null);
             Ok(Some(is_null != *negated))
         }
         Expr::Like { column, pattern } => {
-            let v = find_value(column, columns, row, outer)
+            let v = find_value(column, columns, row, outer, valid_qualifiers)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
             match v {
                 Value::Text(t) => Ok(Some(like_match(t, pattern))),
@@ -144,7 +162,7 @@ pub fn eval_expr_scoped(
             }
         }
         Expr::InInt { column, values } => {
-            let v = find_value(column, columns, row, outer)
+            let v = find_value(column, columns, row, outer, valid_qualifiers)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
             match v {
                 Value::Int(v) => Ok(Some(values.contains(v))),
@@ -153,7 +171,7 @@ pub fn eval_expr_scoped(
             }
         }
         Expr::BetweenInt { column, low, high } => {
-            let v = find_value(column, columns, row, outer)
+            let v = find_value(column, columns, row, outer, valid_qualifiers)
                 .ok_or_else(|| ExecError::UnknownColumn(column.clone()))?;
             match v {
                 Value::Int(v) => Ok(Some(*v >= *low && *v <= *high)),
@@ -163,8 +181,8 @@ pub fn eval_expr_scoped(
         }
         Expr::And(l, r) => {
             match (
-                eval_expr_scoped(l, columns, row, outer)?,
-                eval_expr_scoped(r, columns, row, outer)?,
+                eval_expr_scoped(l, columns, row, outer, valid_qualifiers)?,
+                eval_expr_scoped(r, columns, row, outer, valid_qualifiers)?,
             ) {
                 // Kleene AND: false AND _ = false; _ AND false = false
                 (Some(false), _) | (_, Some(false)) => Ok(Some(false)),
@@ -176,8 +194,8 @@ pub fn eval_expr_scoped(
         }
         Expr::Or(l, r) => {
             match (
-                eval_expr_scoped(l, columns, row, outer)?,
-                eval_expr_scoped(r, columns, row, outer)?,
+                eval_expr_scoped(l, columns, row, outer, valid_qualifiers)?,
+                eval_expr_scoped(r, columns, row, outer, valid_qualifiers)?,
             ) {
                 // Kleene OR: true OR _ = true; _ OR true = true
                 (Some(true), _) | (_, Some(true)) => Ok(Some(true)),
@@ -188,7 +206,7 @@ pub fn eval_expr_scoped(
             }
         }
         Expr::Not(inner) => {
-            match eval_expr_scoped(inner, columns, row, outer)? {
+            match eval_expr_scoped(inner, columns, row, outer, valid_qualifiers)? {
                 Some(true) => Ok(Some(false)),
                 Some(false) => Ok(Some(true)),
                 None => Ok(None), // NOT NULL = NULL (Kleene)
@@ -196,7 +214,7 @@ pub fn eval_expr_scoped(
         }
         Expr::Agg { func, column } => {
             let name = agg_default_alias(*func, column);
-            let v = find_value(&name, columns, row, outer).ok_or(ExecError::UnknownColumn(name))?;
+            let v = find_value(&name, columns, row, outer, valid_qualifiers).ok_or(ExecError::UnknownColumn(name))?;
             Ok(Some(!matches!(v, Value::Null)))
         }
         // Normally rewritten to `Cmp` by `resolve_having_aliases` before a
@@ -210,7 +228,7 @@ pub fn eval_expr_scoped(
             value,
         } => {
             let name = agg_default_alias(*func, column);
-            let v = find_value(&name, columns, row, outer).ok_or(ExecError::UnknownColumn(name))?;
+            let v = find_value(&name, columns, row, outer, valid_qualifiers).ok_or(ExecError::UnknownColumn(name))?;
             let rhs = literal_to_value(value);
             match (v, &rhs) {
                 (Value::Null, _) | (_, Value::Null) => Ok(None),
@@ -226,7 +244,7 @@ pub fn eval_expr_scoped(
             op,
             value,
         } => {
-            let v = find_value(source, columns, row, outer)
+            let v = find_value(source, columns, row, outer, valid_qualifiers)
                 .ok_or_else(|| ExecError::UnknownColumn(source.clone()))?;
             let rhs = literal_to_value(value);
             match (v, &rhs) {
@@ -311,8 +329,9 @@ pub fn eval_scalar(
     expr: &Expr,
     columns: &[String],
     row: &[Value],
+    valid_qualifiers: &[&str],
 ) -> Result<Option<Value>, ExecError> {
-    match eval_expr_scoped(expr, columns, row, &[])? {
+    match eval_expr_scoped(expr, columns, row, &[], valid_qualifiers)? {
         Some(true) => Ok(Some(Value::Int(1))),
         Some(false) => Ok(Some(Value::Int(0))),
         None => Ok(None),

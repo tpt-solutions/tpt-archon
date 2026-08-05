@@ -1,0 +1,33 @@
+# Qualified-column resolution: a qualifier that names no real table in the
+# join must error, not silently match a same-suffix column. Regression for the
+# bug formerly tracked in divergent/known_bugs.slt fact #2 (a `SELECT v FROM
+# t3 JOIN t4 ON bogus.v = t4.v` silently returned `1` because `bogus.v` fell
+# back to matching `t3.v` by trailing segment). Now it is a hard error.
+
+statement ok
+CREATE TABLE t3 (v INT)
+
+statement ok
+CREATE TABLE t4 (v INT)
+
+statement ok
+INSERT INTO t3 (v) VALUES (1)
+
+statement ok
+INSERT INTO t4 (v) VALUES (1)
+
+# `bogus` is not a table in this join -> error, not a silent `1`.
+statement error
+SELECT v FROM t3 JOIN t4 ON bogus.v = t4.v
+
+# A valid qualified reference resolves correctly.
+query I
+SELECT v FROM t3 JOIN t4 ON t3.v = t4.v
+----
+1
+
+# An unqualified reference still resolves against either side.
+query I
+SELECT v FROM t3 JOIN t4 ON t3.v = t4.v
+----
+1

@@ -259,6 +259,7 @@ impl Database {
         scope_columns: &[String],
         cache: &[CacheEntry],
         counter: &mut usize,
+        valid_qualifiers: &[&str],
     ) -> Result<Option<bool>, DbError> {
         match expr {
             Expr::And(l, r) => {
@@ -274,6 +275,7 @@ impl Database {
                             scope_columns,
                             cache,
                             counter,
+                            valid_qualifiers,
                         )?,
                         self.eval_where(
                             r,
@@ -285,6 +287,7 @@ impl Database {
                             scope_columns,
                             cache,
                             counter,
+                            valid_qualifiers,
                         )?,
                     ) {
                         // Kleene AND: false AND _ = false; _ AND false = false
@@ -309,6 +312,7 @@ impl Database {
                             scope_columns,
                             cache,
                             counter,
+                            valid_qualifiers,
                         )?,
                         self.eval_where(
                             r,
@@ -320,6 +324,7 @@ impl Database {
                             scope_columns,
                             cache,
                             counter,
+                            valid_qualifiers,
                         )?,
                     ) {
                         // Kleene OR: true OR _ = true; _ OR true = true
@@ -343,6 +348,7 @@ impl Database {
                         scope_columns,
                         cache,
                         counter,
+                        valid_qualifiers,
                     )? {
                         Some(true) => Some(false),
                         Some(false) => Some(true),
@@ -366,7 +372,7 @@ impl Database {
                 Ok(Some(!rs.rows.is_empty()))
             }
             Expr::InSubquery { column, query } => {
-                let lhs = executor::find_value(column, columns, row, outer)
+                let lhs = executor::find_value(column, columns, row, outer, valid_qualifiers)
                     .ok_or_else(|| DbError::UnknownColumn(column.clone()))?;
                 let idx = *counter;
                 *counter += 1;
@@ -389,7 +395,7 @@ impl Database {
                 Ok(Some(rs.rows.iter().any(|r| &r[0] == lhs)))
             }
             Expr::ScalarCmp { column, op, query } => {
-                let lhs = executor::find_value(column, columns, row, outer)
+                let lhs = executor::find_value(column, columns, row, outer, valid_qualifiers)
                     .ok_or_else(|| DbError::UnknownColumn(column.clone()))?;
                 let idx = *counter;
                 *counter += 1;
@@ -435,7 +441,7 @@ impl Database {
                     CmpOp::Ge => ord != core::cmp::Ordering::Less,
                 }))
             }
-            _ => Ok(executor::eval_expr_scoped(expr, columns, row, outer)?),
+            _ => Ok(executor::eval_expr_scoped(expr, columns, row, outer, valid_qualifiers)?),
         }
     }
 }

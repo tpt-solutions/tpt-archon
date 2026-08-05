@@ -49,35 +49,25 @@ in the wider Phase 8 roadmap (Track A), not here. This document records what is
 - **Source:** `tests/slt/divergent/known_bugs.slt` (fact #2, narrowed)
 - **Category:** Known bug (engine defect, not a stylistic gap)
 - **Severity:** Medium — wrong results are possible, silently
-- **Status:** Open (intentionally not yet fixed)
+- **Status:** **Fixed** (2026-08-05) — regression test at
+  `tests/slt/supported/join_qualified_column.slt`
 
-A `JOIN ... ON` clause that names a *real* table in the join now resolves via
-exact `table.col` matching (fixed; see `supported/joins.slt` and
-`run_select_scoped`'s `on_cols` in `database/select.rs`). What remains: an
-`ON` qualifier naming a table **not** in the join still resolves by stripping to
-its trailing segment and matching any same-suffix column in scope, instead of
-erroring.
+A `JOIN ... ON` clause that names a *real* table in the join resolves via exact
+`table.col` matching (see `supported/joins.slt` and `run_select_scoped`'s
+`on_cols` in `database/select.rs`). A qualifier naming a table **not** in the
+join now errors instead of silently matching a same-suffix column:
+`executor::find_value` only applies the trailing-segment fallback when the
+qualifier names a real in-scope table/alias (threaded through `eval_where` and
+the `JOIN ON` evaluation in `database/select.rs`).
 
 ```sql
 CREATE TABLE t3 (v INT);
 CREATE TABLE t4 (v INT);
 INSERT INTO t3 (v) VALUES (1);
 INSERT INTO t4 (v) VALUES (1);
--- 'bogus' is not a table in this query, but 't3.v' exists, so Postgres would
--- reject 'bogus.v' as an unknown relation; Archon silently treats it as t3.v:
-SELECT v FROM t3 JOIN t4 ON bogus.v = t4.v;  -- returns 1
+-- 'bogus' is not a table in this query; Archon now rejects it as an unknown column.
+SELECT v FROM t3 JOIN t4 ON bogus.v = t4.v;  -- ERROR: unknown column: bogus.v
 ```
-
-- **Archon:** returns `1` (trailing-segment fallback, no error).
-- **Postgres:** `ERROR: invalid reference to FROM-clause entry for table "bogus"`
-  (or, depending on exact text, an "unknown table" error).
-
-**Why not fixed yet:** `executor::find_value`'s same trailing-segment fallback is
-also relied on (deliberately) for aliased *correlated-subquery* resolution
-elsewhere. Tightening it inside the shared `find_value` requires auditing every
-caller first; `Database::column_resolves_locally` (`database/subquery.rs`) already
-avoids that fallback for its own purpose, showing the fix is known-how, not
-unknown-how. Tracked as a deliberate hold, not a lost-cause.
 
 ---
 

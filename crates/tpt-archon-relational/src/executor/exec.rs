@@ -32,7 +32,7 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
             let mut rows = Vec::new();
             for chunk in inner.rows.chunks(BATCH_SIZE) {
                 for row in chunk {
-                    if eval_expr(expr, &inner.columns, row)? {
+                    if eval_expr(expr, &inner.columns, row, &[])? {
                         rows.push(row.clone());
                     }
                 }
@@ -117,7 +117,7 @@ fn execute_node(node: &PlanNode, table: &Table) -> Result<ResultSet, ExecError> 
             if let Some(hv) = having {
                 result
                     .rows
-                    .retain(|row| eval_expr(hv, &result.columns, row).unwrap_or(false));
+                    .retain(|row| eval_expr(hv, &result.columns, row, &[]).unwrap_or(false));
             }
             Ok(result)
         }

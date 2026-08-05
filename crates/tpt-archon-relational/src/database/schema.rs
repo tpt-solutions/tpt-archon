@@ -81,6 +81,7 @@ impl From<executor::ExecError> for DbError {
             executor::ExecError::UnresolvedSubquery => DbError::Unsupported(
                 "internal: subquery reached the pure evaluator unresolved".to_string(),
             ),
+            executor::ExecError::Unsupported(msg) => DbError::Unsupported(msg),
         }
     }
 }

@@ -515,3 +515,41 @@ on crates.io as of late July/early August 2026 (`tpt-eidos-verifier` 0.2.0,
   `formal-proofs/README.md`, `docs/0003-verification-tested-now-proven-later.md`,
   and `CHANGELOG.md` — same "don't let docs drift from reality" standard
   already applied to the marketing-claim reconciliations above.
+
+---
+
+## Phase 10 — Correctness & data-safety hardening (2026-08-05)
+
+Closes four concrete, already-documented limitations in the Correctness &
+data-safety track. No new crates; touches `tpt-archon-relational` (and
+`TODO.md`). See the plan file for the full design.
+
+### 10.1 Bound `LIMIT n` (resource-exhaustion DoS)
+- [x] Add `MAX_LIMIT` const (`1_000_000`) in `parser/select.rs`; reject `LIMIT k`
+  (simple + compound tail) and `ORDER BY cosine(...) LIMIT k` exceeding it at
+  parse time (`ParseError`), surfacing through the normal `DbError::Parse` path.
+
+### 10.2 Fix qualified-column fallback bug (`known_bugs.slt` fact #2)
+- [x] Thread `valid_qualifiers` into `executor::find_value` (and `eval_expr`/
+  `eval_expr_scoped`/`eval_where`) so a qualified name whose qualifier names no
+  in-scope table/alias errors instead of suffix-matching a spurious column.
+- [x] Move `tests/slt/divergent/known_bugs.slt` fact #2 to
+  `tests/slt/supported/join_qualified_column.slt` (move-don't-edit-in-place
+  rule); assert `bogus.v` now errors and valid qualified refs still resolve.
+- [x] Update `docs/POSTGRES_COMPATIBILITY.md` D1 to "Fixed".
+
+### 10.3 Make cross-table `COMMIT` atomic
+- [x] Reorder `Database::run_commit` (`database/txn.rs`) to validate/commit all
+  per-table MVCC txns *before* applying any B-Link tree writes; on any conflict
+  it applies nothing and returns `TransactionError`. Update the `txn.rs` module
+  doc comment (was "known limitation: not atomic").
+
+### 10.4 `RANGE` window frames + `ROWS` default peer-group fix
+- [x] Add `FrameKind` (`Rows`/`Range`) to `WindowFrame` (`parser/ast.rs`); accept
+  `RANGE` numeric-offset frames at parse time (`parser/select.rs`); `GROUPS`
+  still rejected.
+- [x] Default frame (no explicit frame, with `ORDER BY`) is now `RANGE
+  UNBOUNDED PRECEDING .. CURRENT ROW`, grouping tied `ORDER BY` peers (Postgres
+  semantics) in `executor/window.rs`; `Rows` keeps physical-position logic.
+- [x] Update `tests/slt/supported/window_functions.slt` and the `window_*`
+  unit tests for peer-group behavior; add `RANGE` numeric-offset tests.

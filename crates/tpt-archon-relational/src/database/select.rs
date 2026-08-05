@@ -87,6 +87,18 @@ impl Database {
         let (mut columns, mut rows) =
             self.resolve_table_ref_with_ctes(&stmt.table, &merged_ctes, recursive_binding)?;
 
+        // In-scope table/alias qualifiers (FROM table + every JOIN table),
+        // used to reject qualified names that name no real table (see
+        // `executor::find_value` and `tests/slt/divergent/known_bugs.slt`
+        // fact #2). Computed before the JOIN loop so the `ON` evaluation can
+        // use it.
+        let mut scope_qualifiers: Vec<String> = alloc::vec![stmt.table.name().to_string()];
+        for join in &stmt.joins {
+            scope_qualifiers.push(join.table.name().to_string());
+        }
+        let scope_qualifiers_ref: Vec<&str> =
+            scope_qualifiers.iter().map(|s| s.as_str()).collect();
+
         // Process JOINs (nested-loop with general ON expression).
         for join in &stmt.joins {
             let (join_cols, join_rows) =
@@ -137,7 +149,7 @@ impl Database {
                         for jrow in &join_rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &on_cols, &combined)? {
+                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)? {
                                 new_rows.push(combined);
                             }
                         }
@@ -153,7 +165,7 @@ impl Database {
                         for jrow in &join_rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &on_cols, &combined)? {
+                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)? {
                                 new_rows.push(combined);
                                 matched = true;
                             }
@@ -175,7 +187,7 @@ impl Database {
                         for lrow in &rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &on_cols, &combined)? {
+                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)? {
                                 new_rows.push(combined);
                                 matched = true;
                             }
@@ -200,7 +212,7 @@ impl Database {
                         for jrow in &join_rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &on_cols, &combined)? {
+                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)? {
                                 new_rows.push(combined);
                                 left_matched[li] = true;
                             }
@@ -218,7 +230,7 @@ impl Database {
                         for lrow in &rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &on_cols, &combined)? {
+                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)? {
                                 matched = true;
                                 break;
                             }
@@ -277,6 +289,7 @@ impl Database {
                         &scope_columns,
                         &subquery_cache,
                         &mut 0usize,
+                        &scope_qualifiers_ref,
                     )?
                     .unwrap_or(false)
                 {
@@ -324,6 +337,7 @@ impl Database {
                         &table.columns,
                         &hv_cache,
                         &mut 0usize,
+                        &scope_qualifiers_ref,
                     )?
                     .unwrap_or(false)
                 {
@@ -390,6 +404,7 @@ impl Database {
                             &columns,
                             &[],
                             &mut 0usize,
+                            &[],
                         )?
                         .unwrap_or(false)
                     {
@@ -456,6 +471,7 @@ impl Database {
                             &ts.schema.columns,
                             &[],
                             &mut 0usize,
+                            &[],
                         )?
                         .unwrap_or(false)
                     {
@@ -490,6 +506,7 @@ impl Database {
                             &ts.schema.columns,
                             &[],
                             &mut 0usize,
+                            &[],
                         )?
                         .unwrap_or(false)
                     {
@@ -933,13 +950,15 @@ mod tests {
     #[test]
     fn window_sum_running_total_default_frame() {
         let mut db = employees_db();
-        // No explicit frame + an ORDER BY -> default UNBOUNDED PRECEDING ..
-        // CURRENT ROW (a running total).
+        // No explicit frame + an ORDER BY -> default RANGE UNBOUNDED PRECEDING
+        // .. CURRENT ROW, which groups tied ORDER BY values into a single peer
+        // (Postgres behavior). eng salaries: 100, 200, 200 -> the two 200s are
+        // peers, so the running total jumps to the full 500 at the first 200.
         let sql = "SELECT salary, SUM(salary) OVER (PARTITION BY dept ORDER BY salary) AS running \
                     FROM employees WHERE dept = 'eng' ORDER BY salary";
         let rs = db.execute(&parse_statement(sql).unwrap(), &[]).unwrap();
         assert_eq!(int_col(&rs, "salary"), vec![100, 200, 200]);
-        assert_eq!(int_col(&rs, "running"), vec![100, 300, 500]);
+        assert_eq!(int_col(&rs, "running"), vec![100, 500, 500]);
     }
 
     #[test]
@@ -968,10 +987,30 @@ mod tests {
     }
 
     #[test]
-    fn window_range_frame_is_rejected() {
+    fn window_range_frame_numeric_offset() {
+        let mut db = employees_db();
+        // RANGE BETWEEN 1 PRECEDING AND CURRENT ROW over a single INT order
+        // column: rows whose salary lies in [cur - 1, cur]. eng salaries:
+        // 100, 200, 200 -> the two 200s are peers within the range.
         let sql = "SELECT salary, SUM(salary) OVER (ORDER BY salary RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) \
+                    AS r FROM employees WHERE dept = 'eng' ORDER BY salary";
+        let rs = db.execute(&parse_statement(sql).unwrap(), &[]).unwrap();
+        assert_eq!(int_col(&rs, "salary"), vec![100, 200, 200]);
+        assert_eq!(int_col(&rs, "r"), vec![100, 400, 400]);
+    }
+
+    #[test]
+    fn window_range_numeric_offset_requires_single_order_column() {
+        // A RANGE frame with a numeric offset needs exactly one ORDER BY
+        // column; multiple order columns are rejected.
+        let sql = "SELECT SUM(salary) OVER (ORDER BY dept, salary RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) \
                     FROM employees";
-        assert!(parse_statement(sql).is_err());
+        assert!(parse_statement(sql).is_ok()); // parse is fine...
+        // ...but execution rejects the numeric-offset-on-multi-column frame.
+        let mut db = employees_db();
+        let rs = db.execute(&parse_statement(sql).unwrap(), &[]);
+        assert!(matches!(rs, Err(crate::database::schema::DbError::Exec(
+            crate::executor::ExecError::Unsupported(_)))));
     }
 
     #[test]

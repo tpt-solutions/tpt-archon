@@ -49,7 +49,7 @@ query II
 SELECT salary, SUM(salary) OVER (PARTITION BY dept ORDER BY salary) AS running FROM employees WHERE dept = 'eng' ORDER BY salary
 ----
 100 100
-200 300
+200 500
 200 500
 
 query II
@@ -58,6 +58,11 @@ SELECT salary, SUM(salary) OVER (PARTITION BY dept) AS total FROM employees WHER
 50 200
 150 200
 
-# RANGE/GROUPS window frames are not supported (ROWS with numeric offsets only).
-statement error RANGE/GROUPS
-SELECT SUM(salary) OVER (ORDER BY salary RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM employees
+# Default frame is RANGE: tied ORDER BY values are grouped into a single peer,
+# so the running total includes all peers of the current row.
+query II
+SELECT salary, SUM(salary) OVER (ORDER BY salary RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) AS r FROM employees WHERE dept = 'eng' ORDER BY salary
+----
+100 100
+200 400
+200 400

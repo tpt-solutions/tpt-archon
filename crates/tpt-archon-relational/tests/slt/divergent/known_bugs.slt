@@ -1,54 +1,16 @@
 # Known Archon bugs (not stylistic Postgres differences) — these entries
-# are asserted to *keep* diverging from correct behavior. If one of these
-# is ever fixed, its test should move to supported/ rather than being
-# silently updated in place, so the fix is visible in the diff. See
-# ddl.slt (in supported/) for the corpus format convention, including the
-# note on `DbError`'s Debug format for `statement error` patterns.
+# assert that Archon *keeps* diverging from correct behavior. If a bug is ever
+# fixed, its test should move to supported/ rather than being silently updated
+# in place, so the fix is visible in the diff. See ddl.slt (in supported/) for
+# the corpus format convention, including the note on `DbError`'s Debug format
+# for `statement error` patterns.
 #
-# Per Slice-1 spec fact #2, this is a real bug in the engine, not a gap —
-# do not attempt it against real Postgres (the out-archon-pgcompat oracle
-# crate skips divergent/ entirely; see its own doc comment).
+# Per Slice-1 spec, these are real bugs in the engine, not gaps — do not
+# attempt them against real Postgres (the out-archon-pgcompat oracle crate
+# skips divergent/ entirely; see its own doc comment).
 #
-# Facts #1 and #6, formerly tracked in this file, are fixed: CREATE TABLE
-# now rejects a user column named "id" outright instead of silently
-# colliding with the implicit row-id column, and the lexer now honors
-# SQL-standard doubled-quote escaping. Their tests moved to
-# supported/ddl.slt per this file's own move-don't-edit-in-place rule above.
-
-# --- Fact #2 (narrowed): a qualifier for a table not in this join
-# silently falls back to matching by trailing segment, instead of erroring
-# ------------------------------------------------------------------------
-#
-# Originally described as "qualified JOIN ON columns are broken" — that's
-# no longer accurate: a qualifier naming a REAL table in this join (either
-# side) now resolves via exact "table.col" matching (see supported/joins.slt
-# for the fixed case, and `run_select_scoped`'s `on_cols` comment in
-# select.rs). What's left: `find_value` (executor/expr.rs) still resolves
-# an unmatched qualified name by stripping to its trailing segment and
-# matching ANY same-suffix column in scope, without checking whether the
-# qualifier the caller actually wrote names a real table here at all. Below,
-# "bogus" isn't a table in this query, but `t3.v` exists — the trailing-
-# segment fallback silently treats `bogus.v` as if it meant `t3.v` instead
-# of raising an error for the unrecognized qualifier. Not tightened further
-# here because `find_value`'s same fallback is also relied on (deliberately)
-# for aliased correlated-subquery resolution elsewhere — see
-# `Database::column_resolves_locally`'s doc comment in subquery.rs, which
-# already avoids this exact fallback for ITS purpose, showing the fix is
-# know-how, not unknown-how; just not safe to apply inside the shared
-# `find_value` without auditing every caller.
-statement ok
-CREATE TABLE t3 (v INT)
-
-statement ok
-CREATE TABLE t4 (v INT)
-
-statement ok
-INSERT INTO t3 (v) VALUES (1)
-
-statement ok
-INSERT INTO t4 (v) VALUES (1)
-
-query I
-SELECT v FROM t3 JOIN t4 ON bogus.v = t4.v
-----
-1
+# Fact #2 (a qualifier naming a table not in the join silently fell back to
+# matching by trailing segment, instead of erroring) was fixed: qualified
+# names whose qualifier names no in-scope table now error via
+# `executor::find_value`. Its regression test moved to
+# supported/join_qualified_column.slt.

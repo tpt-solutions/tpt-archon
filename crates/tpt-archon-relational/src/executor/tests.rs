@@ -267,7 +267,7 @@ fn eval_scalar_returns_none_for_null_comparison() {
         op: CmpOp::Eq,
         value: Literal::Null,
     };
-    assert!(eval_scalar(&expr, &cols, &row).unwrap().is_none());
+    assert!(eval_scalar(&expr, &cols, &row, &[]).unwrap().is_none());
 }
 
 // A1: eval_scalar returns Some(Int(1)) for true comparison.
@@ -281,7 +281,7 @@ fn eval_scalar_returns_int_for_true_comparison() {
         value: Literal::Int(5),
     };
     assert_eq!(
-        eval_scalar(&expr, &cols, &row).unwrap(),
+        eval_scalar(&expr, &cols, &row, &[]).unwrap(),
         Some(Value::Int(1))
     );
 }
@@ -300,7 +300,7 @@ fn extract_cmp_matches_correct_year() {
         op: CmpOp::Eq,
         value: Literal::Int(2024),
     };
-    assert!(eval_expr(&expr, &cols, &row).unwrap());
+    assert!(eval_expr(&expr, &cols, &row, &[]).unwrap());
 }
 
 #[test]
@@ -313,7 +313,7 @@ fn extract_cmp_rejects_wrong_year() {
         op: CmpOp::Eq,
         value: Literal::Int(2023),
     };
-    assert!(!eval_expr(&expr, &cols, &row).unwrap());
+    assert!(!eval_expr(&expr, &cols, &row, &[]).unwrap());
 }
 
 #[test]
@@ -330,7 +330,7 @@ fn extract_cmp_works_with_hour_field() {
         op: CmpOp::Eq,
         value: Literal::Int(10),
     };
-    assert!(eval_expr(&expr, &cols, &row).unwrap());
+    assert!(eval_expr(&expr, &cols, &row, &[]).unwrap());
 }
 
 #[test]
@@ -344,5 +344,5 @@ fn extract_cmp_null_source_yields_null() {
         value: Literal::Int(1),
     };
     // NULL op value → None (Kleene NULL propagation)
-    assert!(!eval_expr(&expr, &cols, &row).unwrap());
+    assert!(!eval_expr(&expr, &cols, &row, &[]).unwrap());
 }

@@ -107,6 +107,8 @@ pub enum ExecError {
     /// reaching here — this variant only guards against that invariant ever
     /// being violated.
     UnresolvedSubquery,
+    /// A feature is recognized but not (yet) supported by the executor.
+    Unsupported(String),
 }
 
 /// The result of running a query: output column names and rows.
