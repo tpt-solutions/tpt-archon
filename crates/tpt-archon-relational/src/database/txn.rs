@@ -14,6 +14,10 @@
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
+/// Buffered per-table writes captured at COMMIT time: the table name and its
+/// `(row key, encoded row)` writes, snapshotted before MVCC commit/apply.
+type CommittedWrites = Vec<(String, Vec<(u64, Vec<u8>)>)>;
+
 use crate::mvcc;
 
 use super::codec::{decode_row_validated, MVCC_TOMBSTONE};
@@ -46,8 +50,7 @@ impl Database {
 
         // Snapshot every table's buffered writes up front. MVCC `commit`
         // consumes the transaction, so we capture the writes first.
-        let mut writes_by_table: Vec<(String, Vec<(u64, Vec<u8>)>)> =
-            Vec::with_capacity(txns.len());
+        let mut writes_by_table: CommittedWrites = Vec::with_capacity(txns.len());
         for (table_name, txn) in &txns {
             let writes: Vec<(u64, Vec<u8>)> =
                 txn.writes_iter().map(|(k, v)| (k, v.to_vec())).collect();

@@ -17,7 +17,7 @@ statement ok
 INSERT INTO t4 (v) VALUES (1)
 
 # `bogus` is not a table in this join -> error, not a silent `1`.
-statement error
+statement error UnknownColumn
 SELECT v FROM t3 JOIN t4 ON bogus.v = t4.v
 
 # A valid qualified reference resolves correctly.

@@ -96,8 +96,7 @@ impl Database {
         for join in &stmt.joins {
             scope_qualifiers.push(join.table.name().to_string());
         }
-        let scope_qualifiers_ref: Vec<&str> =
-            scope_qualifiers.iter().map(|s| s.as_str()).collect();
+        let scope_qualifiers_ref: Vec<&str> = scope_qualifiers.iter().map(|s| s.as_str()).collect();
 
         // Process JOINs (nested-loop with general ON expression).
         for join in &stmt.joins {
@@ -149,7 +148,8 @@ impl Database {
                         for jrow in &join_rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)? {
+                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)?
+                            {
                                 new_rows.push(combined);
                             }
                         }
@@ -165,7 +165,8 @@ impl Database {
                         for jrow in &join_rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)? {
+                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)?
+                            {
                                 new_rows.push(combined);
                                 matched = true;
                             }
@@ -187,7 +188,8 @@ impl Database {
                         for lrow in &rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)? {
+                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)?
+                            {
                                 new_rows.push(combined);
                                 matched = true;
                             }
@@ -212,7 +214,8 @@ impl Database {
                         for jrow in &join_rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)? {
+                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)?
+                            {
                                 new_rows.push(combined);
                                 left_matched[li] = true;
                             }
@@ -230,7 +233,8 @@ impl Database {
                         for lrow in &rows {
                             let mut combined = lrow.clone();
                             combined.extend_from_slice(jrow);
-                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)? {
+                            if executor::eval_expr(on, &on_cols, &combined, &scope_qualifiers_ref)?
+                            {
                                 matched = true;
                                 break;
                             }
@@ -1006,11 +1010,13 @@ mod tests {
         let sql = "SELECT SUM(salary) OVER (ORDER BY dept, salary RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) \
                     FROM employees";
         assert!(parse_statement(sql).is_ok()); // parse is fine...
-        // ...but execution rejects the numeric-offset-on-multi-column frame.
+                                               // ...but execution rejects the numeric-offset-on-multi-column frame.
         let mut db = employees_db();
         let rs = db.execute(&parse_statement(sql).unwrap(), &[]);
-        assert!(matches!(rs, Err(crate::database::schema::DbError::Exec(
-            crate::executor::ExecError::Unsupported(_)))));
+        assert!(matches!(
+            rs,
+            Err(crate::database::schema::DbError::Unsupported(_))
+        ));
     }
 
     #[test]

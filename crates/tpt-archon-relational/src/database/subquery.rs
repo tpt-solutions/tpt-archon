@@ -441,7 +441,13 @@ impl Database {
                     CmpOp::Ge => ord != core::cmp::Ordering::Less,
                 }))
             }
-            _ => Ok(executor::eval_expr_scoped(expr, columns, row, outer, valid_qualifiers)?),
+            _ => Ok(executor::eval_expr_scoped(
+                expr,
+                columns,
+                row,
+                outer,
+                valid_qualifiers,
+            )?),
         }
     }
 }

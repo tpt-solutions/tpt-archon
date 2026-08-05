@@ -50,7 +50,7 @@ pub(crate) fn find_value<'a>(
         let stripped = &name[dot + 1..];
         // Reject a qualified name whose qualifier isn't a known table/alias
         // rather than silently suffix-matching a spurious column.
-        if !valid_qualifiers.is_empty() && !valid_qualifiers.iter().any(|q| *q == qualifier) {
+        if !valid_qualifiers.is_empty() && !valid_qualifiers.contains(&qualifier) {
             return None;
         }
         if let Some(idx) = columns
@@ -214,7 +214,8 @@ pub fn eval_expr_scoped(
         }
         Expr::Agg { func, column } => {
             let name = agg_default_alias(*func, column);
-            let v = find_value(&name, columns, row, outer, valid_qualifiers).ok_or(ExecError::UnknownColumn(name))?;
+            let v = find_value(&name, columns, row, outer, valid_qualifiers)
+                .ok_or(ExecError::UnknownColumn(name))?;
             Ok(Some(!matches!(v, Value::Null)))
         }
         // Normally rewritten to `Cmp` by `resolve_having_aliases` before a
@@ -228,7 +229,8 @@ pub fn eval_expr_scoped(
             value,
         } => {
             let name = agg_default_alias(*func, column);
-            let v = find_value(&name, columns, row, outer, valid_qualifiers).ok_or(ExecError::UnknownColumn(name))?;
+            let v = find_value(&name, columns, row, outer, valid_qualifiers)
+                .ok_or(ExecError::UnknownColumn(name))?;
             let rhs = literal_to_value(value);
             match (v, &rhs) {
                 (Value::Null, _) | (_, Value::Null) => Ok(None),

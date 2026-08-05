@@ -400,18 +400,24 @@ fn commit_applies_writes_across_two_tables() {
     // (validate-all-then-apply-all) commit must still apply every table's
     // buffered writes on success — not just the first one it touches.
     let mut d = Database::empty();
-    d.execute(&parse_statement("CREATE TABLE t1 (id INT, v INT)").unwrap(), &[])
-        .unwrap();
-    d.execute(&parse_statement("CREATE TABLE t2 (id INT, v INT)").unwrap(), &[])
-        .unwrap();
-    d.execute(&parse_statement("BEGIN").unwrap(), &[]).unwrap();
     d.execute(
-        &parse_statement("INSERT INTO t1 (id, v) VALUES (1, 10)").unwrap(),
+        &parse_statement("CREATE TABLE t1 (k INT, v INT)").unwrap(),
         &[],
     )
     .unwrap();
     d.execute(
-        &parse_statement("INSERT INTO t2 (id, v) VALUES (1, 20)").unwrap(),
+        &parse_statement("CREATE TABLE t2 (k INT, v INT)").unwrap(),
+        &[],
+    )
+    .unwrap();
+    d.execute(&parse_statement("BEGIN").unwrap(), &[]).unwrap();
+    d.execute(
+        &parse_statement("INSERT INTO t1 (k, v) VALUES (1, 10)").unwrap(),
+        &[],
+    )
+    .unwrap();
+    d.execute(
+        &parse_statement("INSERT INTO t2 (k, v) VALUES (1, 20)").unwrap(),
         &[],
     )
     .unwrap();
@@ -435,10 +441,10 @@ fn limit_exceeding_maximum_is_rejected() {
     // avoid materializing an unbounded result set. The cap is enforced at
     // parse time (1_000_000 = MAX_LIMIT).
     let mut d = Database::empty();
-    d.execute(&parse_statement("CREATE TABLE t (id INT)").unwrap(), &[])
+    d.execute(&parse_statement("CREATE TABLE t (k INT)").unwrap(), &[])
         .unwrap();
     let too_big = format!("SELECT * FROM t LIMIT {}", 1_000_001);
-    assert!(d.execute(&parse_statement(&too_big).unwrap(), &[]).is_err());
+    assert!(parse_statement(&too_big).is_err());
     // Exactly the cap (and one below) still parses and runs.
     let at_cap = format!("SELECT * FROM t LIMIT {}", 1_000_000);
     assert!(d.execute(&parse_statement(&at_cap).unwrap(), &[]).is_ok());
@@ -454,10 +460,16 @@ fn qualified_column_with_unknown_table_errors() {
         .unwrap();
     d.execute(&parse_statement("CREATE TABLE t4 (v INT)").unwrap(), &[])
         .unwrap();
-    d.execute(&parse_statement("INSERT INTO t3 (v) VALUES (1)").unwrap(), &[])
-        .unwrap();
-    d.execute(&parse_statement("INSERT INTO t4 (v) VALUES (1)").unwrap(), &[])
-        .unwrap();
+    d.execute(
+        &parse_statement("INSERT INTO t3 (v) VALUES (1)").unwrap(),
+        &[],
+    )
+    .unwrap();
+    d.execute(
+        &parse_statement("INSERT INTO t4 (v) VALUES (1)").unwrap(),
+        &[],
+    )
+    .unwrap();
 
     let r = d.execute(
         &parse_statement("SELECT v FROM t3 JOIN t4 ON bogus.v = t4.v").unwrap(),

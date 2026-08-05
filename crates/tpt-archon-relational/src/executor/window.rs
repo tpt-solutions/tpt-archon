@@ -178,7 +178,10 @@ fn eval_window_call(
                     let uses_numeric = matches!(
                         frame.start,
                         FrameBound::Preceding(_) | FrameBound::Following(_)
-                    ) || matches!(frame.end, FrameBound::Preceding(_) | FrameBound::Following(_));
+                    ) || matches!(
+                        frame.end,
+                        FrameBound::Preceding(_) | FrameBound::Following(_)
+                    );
                     if uses_numeric && order_indices.len() != 1 {
                         return Err(ExecError::Unsupported(
                             "RANGE frame with a numeric offset requires exactly one ORDER BY column"
@@ -254,7 +257,10 @@ fn resolve_frame(
     part_rows: &[usize],
 ) -> (usize, usize) {
     match frame.kind {
-        FrameKind::Rows => (resolve_bound(frame.start, pos, m), resolve_bound(frame.end, pos, m)),
+        FrameKind::Rows => (
+            resolve_bound(frame.start, pos, m),
+            resolve_bound(frame.end, pos, m),
+        ),
         FrameKind::Range => {
             if order_indices.len() > 1 {
                 // Peer group across all ORDER BY columns (default RANGE frame).
@@ -310,8 +316,7 @@ fn resolve_range_by_value(
         FrameBound::UnboundedPreceding => {}
         FrameBound::UnboundedFollowing => {}
         FrameBound::CurrentRow => {
-            low = Some(cur.clone());
-            high = Some(cur.clone());
+            low = combine_low(low, Some(cur.clone()));
         }
         FrameBound::Preceding(k) => low = apply_offset(cur, k, false),
         FrameBound::Following(k) => low = apply_offset(cur, k, true),
@@ -320,7 +325,6 @@ fn resolve_range_by_value(
         FrameBound::UnboundedFollowing => {}
         FrameBound::UnboundedPreceding => {}
         FrameBound::CurrentRow => {
-            low = combine_low(low, Some(cur.clone()));
             high = combine_high(high, Some(cur.clone()));
         }
         FrameBound::Preceding(k) => high = combine_high(high, apply_offset(cur, k, false)),
