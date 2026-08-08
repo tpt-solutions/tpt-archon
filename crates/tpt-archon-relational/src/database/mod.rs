@@ -281,17 +281,42 @@ impl Database {
             _ => {}
         }
 
-        // For DML statements within a session transaction, ensure session txn exists
-        let needs_session_txn = matches!(
-            stmt,
-            Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_)
-        );
-
-        if needs_session_txn && self.session_in_transaction(session_id) {
-            // We need to use session-aware execution for DML
-            // For now, fall back to the global transaction if no session txn
-            // This is a simplified implementation - a full version would need
-            // to refactor the DML execution paths to use session_txns
+        // When this session has an open transaction, route the statement
+        // through *its* MVCC store rather than the shared global transaction.
+        // This isolates concurrent sessions (the previous code let every
+        // session's DML land on one global `active_txns`, so two sessions could
+        // collide and a `ROLLBACK` from one would discard another's writes).
+        //
+        // Implemented by swapping the global transaction fields with the
+        // session's for the duration of execution: `mvcc::Transaction` values
+        // are owned and movable, so no data is cloned or lost. `COMMIT` /
+        // `ROLLBACK` are handled above and call `session_commit` /
+        // `session_rollback`, which operate on `session_txns` directly.
+        if self.session_in_transaction(session_id) {
+            // Pull this session's transaction state into the global fields so
+            // the (unmodified) DML/SELECT execution paths operate on it, then
+            // push any new/updated transactions back into the session. We must
+            // drop the `&mut` into `session_txns` before calling `self.execute`
+            // (which borrows all of `self`) to avoid a borrow conflict.
+            let session_active = {
+                let s_txn = self
+                    .session_txns
+                    .get_mut(&session_id)
+                    .expect("session known to be in transaction");
+                core::mem::take(&mut s_txn.active_txns)
+            };
+            let prev_active = core::mem::take(&mut self.active_txns);
+            let prev_in_txn = self.in_transaction;
+            self.active_txns = session_active;
+            self.in_transaction = true;
+            let result = self.execute(stmt, params);
+            let updated = core::mem::take(&mut self.active_txns);
+            if let Some(s_txn) = self.session_txns.get_mut(&session_id) {
+                s_txn.active_txns = updated;
+            }
+            self.in_transaction = prev_in_txn;
+            self.active_txns = prev_active;
+            return result;
         }
 
         // For all other statements, use the existing execute path

@@ -783,3 +783,43 @@ Enforced at the storage/exec layer of `tpt-archon-relational` (the parser,
 - [ ] Today `gpu` is emission-only. A real execution path (consuming the emitted
   TPTIR on an external GPU backend) remains out of scope until a concrete target
   exists. Not a correctness blocker; tracked for completeness.
+
+---
+
+## Phase 12 implementation note (2026-08-09)
+
+Subset of the remaining Phase 12 items implemented in this pass (all CI gates
+green: `cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo test
+--workspace`):
+
+- **12.4 column-type matrix (DONE):** authoritative mapping in
+  `docs/COLUMN_TYPES.md` plus `ColumnType::pg_type_name` / `pg_type_oid`
+  (`parser/ast.rs`) used by `pg_catalog` emulation and the wire
+  `RowDescription`. Unit-tested.
+- **12.6 backup / restore (DONE, v1):** `out-archon-pgwire` gains a `backup`
+  module + `archon-backup` CLI (`backup <db> <dir>` / `restore <snap> <db>` /
+  `list <dir>`) that snapshots the data file and its `.wal` sidecar. WAL
+  shipping / PITR and replication/HA remain deferred.
+- **12.3 `pg_catalog` emulation (DONE):** `out-archon-pgwire/src/catalog.rs`
+  synthesizes `pg_namespace`, `pg_class`, `pg_attribute`, `pg_type`,
+  `pg_tables`, `pg_database`, `information_schema.tables`,
+  `information_schema.columns` from live `Database` introspection; intercepted
+  in `simple_query` before the SQL executor. The parser now also accepts
+  `schema.table` qualifications (needed for `pg_catalog.*` /
+  `information_schema.*` to even parse). No `WHERE` filtering yet.
+- **12.3 SCRAM-SHA-256 (DONE):** real PBKDF2-HMAC-SHA-256 credential store +
+  verified client-proof exchange in `startup.rs` (the previous stub accepted
+  any proof). Startup offers `AuthenticationSASL` when a session has a
+  credential store; `SET statement_timeout` parsing stored per-session.
+- **12.2 statement timeout (DONE, knob):** `SET statement_timeout` is parsed
+  and stored per-session (`Session::parse_statement_timeout` /
+  `set_statement_timeout`); enforcement is best-effort in the synchronous
+  path.
+
+Still deferred (explicitly out of scope / research-scale, unchanged from the
+pre-existing TODO text): per-session DML routing through `session_txns` +
+global-mutex replacement, `io_uring`-backend wiring into connection I/O, TLS
+transport, remaining dialect gaps (stored procs/triggers/sequences/`COPY`),
+WAL shipping / PITR, replication/HA, configuration/observability/metrics
+(12.6), machine-checked Coq/Lean proofs (12.7), and a real GPU execution path
+(12.8).

@@ -22,6 +22,8 @@ tpt-archon-kernel = { path = "../tpt-archon-kernel", version = "0.1.0" }
 thiserror = "1.0"
 rand = "0.8"
 bytes = "1.0"
+sha2 = "0.10"
+hmac = "0.12"
 
 [dev-dependencies]
 postgres = "0.19"

@@ -22,6 +22,7 @@ pub fn handle_simple_query(query: &str, db: &mut Database, session: &mut Session
         if raw_stmt.is_empty() {
             continue;
         }
+        session.metrics.record_statement();
 
         let Ok(stmt) = parse_sql(raw_stmt) else {
             let err = DbError::Unsupported(raw_stmt.to_string());
@@ -29,7 +30,50 @@ pub fn handle_simple_query(query: &str, db: &mut Database, session: &mut Session
             continue;
         };
 
-        let Ok((rs, tag)) = db.execute_with_stats(&stmt, &[]) else {
+        // pg_catalog / information_schema introspection is synthesized from the
+        // live Database, not executed as SQL (the catalog relations don't exist
+        // as real tables). See `catalog` module.
+        if let Some(rs) = crate::catalog::handle_catalog(&stmt, db) {
+            emit_select(&mut out, &rs, session);
+            continue;
+        }
+
+        // `SET statement_timeout` is handled at the session layer (Phase 12.2):
+        // it configures the per-statement deadline knob rather than touching the
+        // Database. Execution still runs synchronously here; preemption of a
+        // runaway query requires the async scheduler (tracked separately).
+        if let Statement::SetParameter(sp) = &stmt {
+            if sp.name.eq_ignore_ascii_case("statement_timeout") {
+                match crate::session::Session::parse_statement_timeout(&sp.value) {
+                    Some(ms) => {
+                        session.set_statement_timeout(ms);
+                        let mut w = MessageWriter::new();
+                        w.write_command_complete("SET", 0);
+                        out.extend_from_slice(w.bytes());
+                        continue;
+                    }
+                    None => {
+                        let mut w = MessageWriter::new();
+                        w.write_error_response(
+                            &alloc::format!(
+                                "invalid value for parameter \"statement_timeout\": \"{}\"",
+                                sp.value
+                            ),
+                            Some(*b"22023"),
+                        );
+                        out.extend_from_slice(w.bytes());
+                        session.set_failed();
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Execute through the session's transaction state so concurrent
+        // connections get real per-session MVCC isolation (BEGIN/COMMIT/
+        // ROLLBACK and DML are scoped to `session.id`, not the global
+        // transaction).
+        let Ok((rs, tag)) = db.execute_in_session_with_stats(session.id, &stmt, &[]) else {
             let err = DbError::Unsupported(raw_stmt.to_string());
             emit_error(&mut out, &err, session);
             continue;
@@ -78,6 +122,7 @@ pub fn handle_simple_query(query: &str, db: &mut Database, session: &mut Session
     };
     w.write_ready_for_query(txn);
     out.extend_from_slice(w.bytes());
+    session.metrics.record_bytes_sent(out.len() as u64);
     out
 }
 
@@ -225,11 +270,50 @@ fn parse_sql(raw: &str) -> Result<Statement, String> {
     parse_statement(&cleaned).map_err(|e| e.0)
 }
 
+/// Emits a `SELECT`-style response (RowDescription + DataRow*s + CommandComplete)
+/// for an already-computed [`ResultSet`], used by both the normal query path and
+/// the `pg_catalog`/`information_schema` emulation path.
+fn emit_select(
+    out: &mut Vec<u8>,
+    rs: &tpt_archon_relational::executor::ResultSet,
+    session: &mut Session,
+) {
+    if !rs.columns.is_empty() {
+        let cols: Vec<_> = rs
+            .columns
+            .iter()
+            .map(|name| crate::codec::message::ColumnDesc {
+                name: name.clone(),
+                table_oid: 0,
+                column_attr: 0,
+                type_oid: type_oid_for_value(&Value::Null),
+                type_size: -1,
+                type_mod: -1,
+                format: 0,
+            })
+            .collect();
+        let mut w = MessageWriter::new();
+        w.write_row_description(&cols);
+        out.extend_from_slice(w.bytes());
+        for row in &rs.rows {
+            let mut w = MessageWriter::new();
+            w.write_data_row(&cols, row);
+            out.extend_from_slice(w.bytes());
+        }
+    }
+    let mut w = MessageWriter::new();
+    let n = rs.rows.len() as u64;
+    w.write_command_complete("SELECT", n);
+    out.extend_from_slice(w.bytes());
+    update_txn_status(session, &Statement::SelectLiteral(Vec::new()));
+}
+
 fn emit_error(out: &mut Vec<u8>, err: &DbError, session: &mut Session) {
     let mut w = MessageWriter::new();
     let ss = crate::sqlstate::sqlstate_for_db_error(err);
     w.write_error_response(&alloc::format!("{err}"), Some(*ss.as_bytes()));
     out.extend_from_slice(w.bytes());
+    session.metrics.record_error();
     session.set_failed();
 }
 

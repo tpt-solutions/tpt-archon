@@ -15,10 +15,13 @@
 
 extern crate alloc;
 
+pub mod backup;
+pub mod catalog;
 pub mod codec;
 pub mod compat;
 pub mod error;
 pub mod extended;
+pub mod metrics;
 pub mod session;
 pub mod simple_query;
 pub mod sqlstate;
@@ -48,11 +51,13 @@ use crate::session::Session;
 pub fn serve(addr: &str, db: Arc<Mutex<Database>>) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     listener.set_nonblocking(false)?;
+    let metrics = Arc::new(crate::metrics::Metrics::new());
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let db = Arc::clone(&db);
-                std::thread::spawn(move || handle_connection(stream, db));
+                let metrics = Arc::clone(&metrics);
+                std::thread::spawn(move || handle_connection(stream, db, metrics));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(e) => return Err(e),
@@ -62,9 +67,14 @@ pub fn serve(addr: &str, db: Arc<Mutex<Database>>) -> std::io::Result<()> {
 }
 
 #[cfg(feature = "std")]
-fn handle_connection(mut stream: TcpStream, db: Arc<Mutex<Database>>) {
+fn handle_connection(
+    mut stream: TcpStream,
+    db: Arc<Mutex<Database>>,
+    metrics: Arc<crate::metrics::Metrics>,
+) {
     let mut reader = MessageReader::new();
     let mut session = Session::new();
+    session.metrics = metrics;
     let mut buf = [0u8; 8192];
 
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(300)));

@@ -939,6 +939,18 @@ fn parse_table_ref(ts: &mut TokenStream) -> Result<TableRef, ParseError> {
             })
         }
         Tok::Ident(name) => {
+            // Allow an optional `schema.table` qualification (e.g.
+            // `pg_catalog.pg_tables`, `information_schema.columns`). The schema
+            // prefix is preserved in `name` and stripped by consumers that only
+            // care about the relation (e.g. the wire `pg_catalog` emulation).
+            let mut full = name.to_string();
+            if let Tok::Dot = ts.peek() {
+                ts.next();
+                if let Tok::Ident(schema_suffix) = ts.next() {
+                    full.push('.');
+                    full.push_str(&schema_suffix);
+                }
+            }
             let alias = if let Tok::Ident(kw) = ts.peek() {
                 if eq_ignore_case(&kw, "as") {
                     ts.next();
@@ -949,10 +961,7 @@ fn parse_table_ref(ts: &mut TokenStream) -> Result<TableRef, ParseError> {
             } else {
                 None
             };
-            Ok(TableRef::Named {
-                name: name.to_string(),
-                alias,
-            })
+            Ok(TableRef::Named { name: full, alias })
         }
         _ => Err(ParseError("expected table name or '('".to_string())),
     }

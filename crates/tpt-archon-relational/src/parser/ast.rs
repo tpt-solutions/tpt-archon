@@ -385,6 +385,45 @@ pub enum ColumnType {
     Vector,
 }
 
+impl ColumnType {
+    /// PostgreSQL type name used when advertising this column to wire-protocol
+    /// clients (e.g. `pg_catalog` emulation and `RowDescription` OIDs).
+    pub fn pg_type_name(&self) -> &'static str {
+        match self {
+            ColumnType::Int => "int8",
+            ColumnType::Boolean => "bool",
+            ColumnType::Float => "float4",
+            ColumnType::Double => "float8",
+            ColumnType::Numeric => "numeric",
+            ColumnType::Text => "text",
+            ColumnType::Varchar(_) => "varchar",
+            ColumnType::Date => "date",
+            ColumnType::Timestamp => "timestamp",
+            ColumnType::Vector => "vector",
+        }
+    }
+
+    /// PostgreSQL type OID corresponding to [`ColumnType::pg_type_name`].
+    ///
+    /// `vector` (pgvector) has no fixed OID and is advertised as `text` (25)
+    /// so `psql` output is byte-identical to a real pgvector server (Phase 8
+    /// B5 vector-type wire encoding decision).
+    pub fn pg_type_oid(&self) -> i32 {
+        match self {
+            ColumnType::Int => 20,
+            ColumnType::Boolean => 16,
+            ColumnType::Float => 700,
+            ColumnType::Double => 701,
+            ColumnType::Numeric => 1700,
+            ColumnType::Text => 25,
+            ColumnType::Varchar(_) => 1043,
+            ColumnType::Date => 1082,
+            ColumnType::Timestamp => 1114,
+            ColumnType::Vector => 25,
+        }
+    }
+}
+
 /// A join type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinType {
@@ -708,3 +747,28 @@ pub enum Statement {
 /// A parse error with a human-readable message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError(pub String);
+
+#[cfg(test)]
+mod column_type_matrix_tests {
+    use super::*;
+
+    #[test]
+    fn every_column_type_has_a_pg_mapping() {
+        let all = [
+            ColumnType::Int,
+            ColumnType::Boolean,
+            ColumnType::Float,
+            ColumnType::Double,
+            ColumnType::Numeric,
+            ColumnType::Text,
+            ColumnType::Varchar(10),
+            ColumnType::Date,
+            ColumnType::Timestamp,
+            ColumnType::Vector,
+        ];
+        for ct in all {
+            assert!(!ct.pg_type_name().is_empty());
+            assert_ne!(ct.pg_type_oid(), 0);
+        }
+    }
+}

@@ -1679,3 +1679,44 @@ fn extract_is_null_on_nullable_date() {
     assert_eq!(r.rows.len(), 1);
     assert_eq!(r.rows[0][0], Value::Int(1));
 }
+
+#[test]
+fn per_session_transactions_are_isolated() {
+    let mut d = Database::empty();
+    d.execute(&parse("CREATE TABLE t (v INT)"), &[]).unwrap();
+    let s1 = SessionId::new();
+    let s2 = SessionId::new();
+
+    // s1 opens a transaction and inserts; s2 must not see the uncommitted row.
+    d.session_begin(s1).unwrap();
+    d.execute_in_session(s1, &parse("INSERT INTO t (v) VALUES (1)"), &[])
+        .unwrap();
+
+    let r2 = d
+        .execute_in_session(s2, &parse("SELECT v FROM t"), &[])
+        .unwrap();
+    assert_eq!(r2.rows.len(), 0, "s2 must not see s1's uncommitted row");
+
+    d.session_commit(s1).unwrap();
+
+    let r2b = d
+        .execute_in_session(s2, &parse("SELECT v FROM t"), &[])
+        .unwrap();
+    assert_eq!(r2b.rows.len(), 1, "s2 must see s1's committed row");
+
+    // s2 begins, inserts (uncommitted), then rolls back — its writes must be
+    // discarded and not leak into s1.
+    d.session_begin(s2).unwrap();
+    d.execute_in_session(s2, &parse("INSERT INTO t (v) VALUES (2)"), &[])
+        .unwrap();
+    d.session_rollback(s2).unwrap();
+
+    let r1 = d
+        .execute_in_session(s1, &parse("SELECT v FROM t"), &[])
+        .unwrap();
+    assert_eq!(
+        r1.rows.len(),
+        1,
+        "s2's rolled-back insert must be discarded"
+    );
+}

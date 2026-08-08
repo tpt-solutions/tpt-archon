@@ -38,6 +38,8 @@ pub struct Server {
     config: ServerConfig,
     database: Arc<Mutex<Session>>,
     listener: Option<TcpListener>,
+    /// Shared, lock-free metrics for all connections handled by this server.
+    metrics: Arc<crate::metrics::Metrics>,
 }
 
 impl Default for Server {
@@ -53,6 +55,7 @@ impl Server {
             config,
             database: Arc::new(Mutex::new(database)),
             listener: None,
+            metrics: Arc::new(crate::metrics::Metrics::new()),
         }
     }
     
@@ -70,9 +73,11 @@ impl Server {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
+                    self.metrics.record_connection_accepted();
                     let database = Arc::clone(&self.database);
+                    let metrics = Arc::clone(&self.metrics);
                     let handle = thread::spawn(move || {
-                        if let Err(e) = handle_connection(stream, database) {
+                        if let Err(e) = handle_connection(stream, database, metrics) {
                             // Check if it's a clean termination
                             if !matches!(e, PgWireError::Protocol(ref s) if s == "Terminate") {
                                 error!("Connection error: {}", e);
@@ -110,6 +115,13 @@ impl Server {
             .ok_or_else(|| PgWireError::Protocol("Server not running".to_string()))?
             .local_addr()
             .map_err(Into::into)
+    }
+
+    /// Returns the shared metrics handle for this server. Read
+    /// [`Metrics::snapshot`](crate::metrics::Metrics::snapshot) to observe
+    /// connection/query/error throughput at runtime.
+    pub fn metrics(&self) -> Arc<crate::metrics::Metrics> {
+        Arc::clone(&self.metrics)
     }
     
     /// Shutdown the server
