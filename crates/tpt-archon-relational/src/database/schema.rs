@@ -13,13 +13,36 @@ use crate::parser;
 /// enums with manual match-arm bridging between them).
 pub use parser::ColumnType;
 
-/// A table schema: ordered column names and their types.
-#[derive(Debug, Clone)]
+/// A foreign-key constraint: this table's `columns` must reference a unique (or
+/// primary) key `ref_columns` in `ref_table`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKey {
+    /// The constrained columns in the owning table.
+    pub columns: Vec<String>,
+    /// The referenced table.
+    pub ref_table: String,
+    /// The referenced columns in `ref_table`.
+    pub ref_columns: Vec<String>,
+}
+
+/// A table schema: ordered column names and their types, plus any declared
+/// integrity constraints.
+#[derive(Debug, Clone, Default)]
 pub struct Schema {
     /// Column names in order.
     pub columns: Vec<String>,
     /// Column types, positionally aligned with `columns`.
     pub types: Vec<ColumnType>,
+    /// Columns declared `NOT NULL` (or that are part of a primary key).
+    pub not_null: Vec<String>,
+    /// The primary-key columns, if a primary key is declared.
+    pub primary_key: Option<Vec<String>>,
+    /// Composite `UNIQUE` column groups (excluding the primary key).
+    pub unique: Vec<Vec<String>>,
+    /// Foreign-key constraints.
+    pub foreign_keys: Vec<ForeignKey>,
+    /// `CHECK` predicate expressions rows must satisfy.
+    pub checks: Vec<crate::parser::Expr>,
 }
 
 impl Schema {
@@ -68,6 +91,14 @@ pub enum DbError {
     /// required shape: a scalar subquery must return exactly one row and one
     /// column; an `IN` subquery must return exactly one column.
     SubqueryCardinality(String),
+    /// A `NOT NULL` constraint was violated on insert/update.
+    NotNullViolation(String),
+    /// A `UNIQUE` or `PRIMARY KEY` constraint was violated (duplicate key).
+    UniqueViolation(String),
+    /// A `CHECK` constraint evaluated to false (or unknown) on insert/update.
+    CheckViolation(String),
+    /// A `FOREIGN KEY` constraint was violated (referenced key missing).
+    ForeignKeyViolation(String),
     /// Execution error propagated from the executor.
     Exec(executor::ExecError),
 }
@@ -106,6 +137,10 @@ impl fmt::Display for DbError {
             DbError::Unsupported(msg) => write!(f, "unsupported: {}", msg),
             DbError::ColumnCountMismatch => write!(f, "column count mismatch"),
             DbError::SubqueryCardinality(msg) => write!(f, "subquery cardinality: {}", msg),
+            DbError::NotNullViolation(c) => write!(f, "NOT NULL constraint violated: {}", c),
+            DbError::UniqueViolation(c) => write!(f, "UNIQUE constraint violated: {}", c),
+            DbError::CheckViolation(c) => write!(f, "CHECK constraint violated: {}", c),
+            DbError::ForeignKeyViolation(c) => write!(f, "FOREIGN KEY constraint violated: {}", c),
             DbError::Exec(e) => write!(f, "execution error: {:?}", e),
         }
     }

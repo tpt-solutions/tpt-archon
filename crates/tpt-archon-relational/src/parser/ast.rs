@@ -313,6 +313,42 @@ pub enum AggregateFunc {
     Max,
 }
 
+/// A column-level constraint in `CREATE TABLE`.
+///
+/// `CHECK` constraints are only supported at the table level (see
+/// [`TableConstraint::Check`]); column-level `CHECK (expr)` is intentionally not
+/// parsed so the parser's structure stays unambiguous (`col type [constraints]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnConstraint {
+    /// `NOT NULL` — the column may not hold SQL `NULL`.
+    NotNull,
+    /// `PRIMARY KEY` — implies `NOT NULL` plus a unique constraint on the column.
+    PrimaryKey,
+    /// `UNIQUE` — the column's values must be distinct across rows.
+    Unique,
+}
+
+/// A table-level constraint in `CREATE TABLE`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableConstraint {
+    /// `PRIMARY KEY (c1, c2, ...)` — implies `NOT NULL` on each component plus a
+    /// composite uniqueness constraint.
+    PrimaryKey(Vec<String>),
+    /// `UNIQUE (c1, c2, ...)` — composite uniqueness constraint.
+    Unique(Vec<String>),
+    /// `FOREIGN KEY (cols) REFERENCES other (cols)` — referential integrity.
+    ForeignKey {
+        /// The constrained columns in this table.
+        columns: Vec<String>,
+        /// The referenced table.
+        ref_table: String,
+        /// The referenced columns in `ref_table` (must be a key there).
+        ref_columns: Vec<String>,
+    },
+    /// `CHECK (expr)` — a boolean predicate the row must satisfy.
+    Check(Expr),
+}
+
 /// A column definition in `CREATE TABLE`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnDef {
@@ -320,6 +356,8 @@ pub struct ColumnDef {
     pub name: String,
     /// Column type.
     pub ctype: ColumnType,
+    /// Column-level constraints (`NOT NULL`, `PRIMARY KEY`, `UNIQUE`).
+    pub constraints: Vec<ColumnConstraint>,
 }
 
 /// A column type in SQL DDL.
@@ -517,13 +555,16 @@ pub struct DeleteStatement {
     pub filter: Option<Expr>,
 }
 
-/// A parsed `CREATE TABLE t (col type, ...)` statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A parsed `CREATE TABLE t (col type [constraints], ... [table constraints])`
+/// statement.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CreateTableStatement {
     /// The table name.
     pub table: String,
-    /// Column definitions.
+    /// Column definitions (each optionally carrying column-level constraints).
     pub columns: Vec<ColumnDef>,
+    /// Table-level constraints (`PRIMARY KEY`, `UNIQUE`, `FOREIGN KEY`, `CHECK`).
+    pub constraints: Vec<TableConstraint>,
 }
 
 /// A parsed `CREATE VIEW name AS <select>` statement.

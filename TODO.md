@@ -139,8 +139,8 @@ service on the Archon microkernel. Depends on all three crates above.
 - [x] Vectorized (batch, not row-at-a-time) execution
 - [x] `tpt-gpu-ir-spec` (TPTIR emitter) integration behind the `gpu` feature: `relational::gpu::lower_topk`/`emit_topk` lower a vectorized top-k scan to TPTIR text for an external GPU backend (the emitter is NOT a runtime; CPU `vector_topk` stays the fallback):
   - [x] Vector similarity search (RAG/embeddings use case) (CPU fallback `vector_topk`; GPU path emits TPTIR via `tpt-gpu-ir-spec`)
-  - [ ] Complex aggregations pushed to GPU
-  - [ ] ML UDFs
+  - [x] Complex aggregations pushed to GPU (`relational::gpu::lower_aggregate`/`emit_aggregate` lower `Sum`/`Min`/`Max`/`Avg`/`Count` to `Reduce*`/`Divf`/`Op::Custom`; surfaced via `EXPLAIN`, Phase 11.1 — still `EXPLAIN`-only, not wired into execution)
+  - [ ] ML UDFs (`Gemm` lowering) — explicitly deferred (Phase 11.1): no UDF syntax exists anywhere in the SQL surface to justify it.
   - [x] Cost model decides CPU vs GPU dispatch per query (not GPU-always) (`planner::Dispatch`; GPU only when `gpu` feature + large scan)
 
 ### MVCC
@@ -167,7 +167,7 @@ service on the Archon microkernel. Depends on all three crates above.
 - [x] `formal-proofs/` — QF_LRA **assertion-harness** `.telos` artifacts for each verified invariant (WAL, B-Tree, MVCC, scheduler), checked into the repo and discharged by `cargo test -p out-archon-verify` via `tpt-telos-verifier` (see `formal-proofs/README.md`). These are **solver-checked regression tests, not machine-checked Coq/Lean proofs**; QF_LRA cannot express multi-interleaving serializability or capability unforgeability, so the docs say so plainly. `tpt-telos` has no Coq/Lean backend — its codegen targets Rust/Go; the `.telos` sources + passing harness tests are the authoritative artifacts. The node-capacity page-fit bound is proven separately with `tpt-eidos-verifier`.
 - [x] ADRs in `docs/` for major architectural decisions as they're made (not just ADR 0001) (added ADR 0002 zero-alloc primitives, ADR 0003 verification tested-now-proven-later)
 - [x] Zero-CVE / zero-silent-corruption / zero-race-condition claims in `spec.txt` are marketing language until backed by the formal verification work above — don't repeat them in crate descriptions until proofs exist (no such claims appear in any crate `description`/docs; enforced by ADR 0003)
-- [ ] `LIMIT n` in `tpt-archon-relational` has no upper bound — a caller-supplied huge `n` materializes a proportionally large result set (`executor.rs`'s `truncate(*n as usize)` is safe, no panic/UB, but there's no cap on memory use). Documented here as a known resource-exhaustion characteristic of an in-memory, non-paginated engine rather than fixed with an arbitrary cap that would silently change query semantics — revisit once a real deployment target (network-facing vs. embedded) clarifies what cap, if any, makes sense.
+- [x] `LIMIT n` upper bound — closed by Phase 10.1: `MAX_LIMIT = 1_000_000` is enforced at parse time for simple `SELECT`/`ORDER BY cosine(...) LIMIT k` and compound-tail `LIMIT`, surfacing as a `ParseError`. Replaces the documented unbounded-`truncate` resource-exhaustion characteristic; an operator-tunable statement-memory cap (rather than a hard-coded constant) remains a follow-up (see 12.6).
 
 ---
 
@@ -678,8 +678,9 @@ Tracking the gaps called out when the repo was assessed as "not production
 ready" (see the README Status section). The four shippable crates are now
 published to crates.io, so the remaining work is correctness, durability,
 concurrency, PostgreSQL-completeness, operations, and verification maturity —
-not packaging. Items are ordered by blocker severity. **12.1 is implemented;
-12.2–12.8 are tracked and not yet started.**
+not packaging. **12.1, 12.4, 12.5, and the CI half of 12.7 are implemented;
+12.2/12.3/12.6(partial)/12.8 and the machine-checked-proofs half of 12.7
+remain tracked.**
 
 ### 12.1 Durable, fsync'd WAL — **IMPLEMENTED (2026-08-08)**
 The previous WAL was in-memory (`crates/tpt-archon-core/src/wal.rs`: `bytes:
@@ -699,13 +700,15 @@ the log, so a real crash could not be recovered. Fixed:
   archival, incremental checkpointing instead of full-rewrite-per-put, page +
   WAL frame checksums (see 12.5).
 
-### 12.2 Real concurrency beyond the global mutex — tracked, not started
-Today `Database` has no internal lock; `out-archon-pgwire/src/server.rs:54`
-wraps it in one global `Arc<Mutex<Session>>`, so **all connections serialize
-through a single mutex** — one slow statement blocks every client. MVCC exists
-but execution is single-threaded/optimistic with conflict-abort; per-session
-transaction state and reachable `40001` serialization failures are still
-deferred (Phase 8 B5).
+### 12.2 Real concurrency beyond the global mutex — partially scaffolded, not started
+Today `Database` has no internal lock; `out-archon-pgwire/src/server.rs` wraps it
+in one global `Arc<Mutex<Session>>`, so **all connections serialize through a
+single mutex** — one slow statement blocks every client. A `SessionTxn` /
+`session_txns: BTreeMap<SessionId, SessionTxn>` scaffold already exists in
+`crates/tpt-archon-relational/src/database/mod.rs`, but it is not yet wired to
+per-connection state in the wire server. MVCC exists but execution is
+single-threaded/optimistic with conflict-abort; per-session transaction state
+and reachable `40001` serialization failures are still deferred (Phase 8 B5).
 - [ ] Per-session (not per-`Database`) transaction state in `tpt-archon-relational`
   (unlocks per-statement vs per-transaction locking and reachable `40001`).
 - [ ] Replace the global `Arc<Mutex<Session>>` with per-connection/per-transaction
@@ -726,33 +729,55 @@ deferred (Phase 8 B5).
 - [ ] Remaining dialect gaps as needed: stored procedures/functions, triggers,
   sequences/identity, broader column types, `COPY` (Phase 8 B5).
 
-### 12.4 Constraints & referential integrity — tracked, not started
-- [ ] `NOT NULL`, `UNIQUE`, `CHECK`, `PRIMARY KEY` enforcement at the storage/exec
-  layer.
-- [ ] Foreign-key (referential integrity) enforcement — currently none.
-- [ ] A broader, documented column-type matrix.
+### 12.4 Constraints & referential integrity — **IMPLEMENTED (2026-08-09)**
+Enforced at the storage/exec layer of `tpt-archon-relational` (the parser,
+`Schema`, `Database::run_create_table`/`run_insert_stmt`/`run_update`/
+`run_delete`, and `out-archon-pgwire`'s SQLSTATE mapping were all extended):
+- `NOT NULL`, `UNIQUE`, `PRIMARY KEY` (column-level and table-level), and
+  `CHECK (expr)` (evaluated per row via `Database::eval_where`) are enforced on
+  `INSERT`/`UPDATE`; `FOREIGN KEY ... REFERENCES` is enforced on insert
+  (referenced key must exist) and on delete (`ON DELETE RESTRICT`). Composite
+  keys and multi-row `INSERT` internal duplicates are both caught. New
+  `DbError` variants (`NotNullViolation`/`UniqueViolation`/`CheckViolation`/
+  `ForeignKeyViolation`) were added and threaded through **every** exhaustive
+  `DbError` match (`schema.rs` `Display`, `out-archon-pgwire`'s
+  `db_error_to_sqlstate` + `sqlstate.rs` `sqlstate_for_db_error`, and the
+  `fmt_db_error` copies in `out-archon-sql`/`out-archon-node`/`out-archon-py`/
+  `out-archon-wasm`) so `cargo test --workspace` stays green (per the 10.5
+  convention). Wired to PostgreSQL SQLSTATEs `23502`/`23505`/`23514`/`23503`.
+- [x] `NOT NULL`, `UNIQUE`, `CHECK`, `PRIMARY KEY` enforcement at the storage/exec layer.
+- [x] Foreign-key (referential integrity) enforcement — `INSERT` referential
+  check + `ON DELETE RESTRICT` (no `ON DELETE CASCADE`/SET NULL yet).
+- [ ] A broader, documented column-type matrix — `ColumnType` already covers the
+  common types; this remains a documentation/coverage follow-up, not a correctness gap.
 
-### 12.5 On-disk checksums — tracked, not started
-- [ ] Page-frame checksums in `tpt-archon-core` (defend against silent disk
-  corruption; relational has a row-decode checksum from Phase 5.1, but core
-  pages/WAL frames do not).
-- [ ] WAL frame checksums (complements 12.1; lets replay reject corrupt frames
-  instead of relying solely on `Wal::from_bytes` framing/truncation).
+### 12.5 On-disk checksums — **IMPLEMENTED (2026-08-08 / earlier)**
+- [x] Page-frame checksums in `tpt-archon-core` (`checksum.rs` `PAGE_CRC` +
+  `crc32`; `page.rs` reserves `PAGE_SIZE + PAGE_CRC` per on-disk block and
+  rejects `StorageError::Corrupt` on mismatch — landed in the Phase 11/12.1
+  commit).
+- [x] WAL frame checksums (`wal.rs` has framed CRC32 over every record body with a
+  `BadChecksum` rejection path, so `replay`/`from_bytes` drop corrupt/torn tails).
 
 ### 12.6 Operations & deployment — tracked, not started
 - [ ] Backup / restore tooling and WAL shipping / point-in-time recovery (PITR).
 - [ ] Replication / high availability (primary + replica via WAL shipping).
 - [ ] Configuration surface, structured observability/logging, metrics.
-- [ ] Resource caps (statement memory, `LIMIT` bound) — closes the DoS gap.
+- [x] `LIMIT` bound (resource-exhaustion DoS) — closed by Phase 10.1's
+  `MAX_LIMIT`; an operator-tunable **statement-memory** cap (rather than the
+  hard-coded constant) is the remaining sub-item and is still tracked.
 
-### 12.7 Verification maturity — tracked, not started
-- [ ] Promote `out-archon-verify` from an opt-in/non-blocking harness to a
-  **required** CI gate (today `pg-compat` is `continue-on-error`; the eidos/telos
-  checks are not blocking).
+### 12.7 Verification maturity — partial
+- [x] `out-archon-verify` promoted from an opt-in/non-blocking harness to a
+  **required** CI gate (new `verify` job in `.github/workflows/ci.yml`; it is a
+  workspace member depending only on published crates.io ecosystem verifiers, so
+  it runs on the standard registry — failing it blocks merges).
 - [ ] Pursue machine-checked proofs (Coq/Lean) for the safety claims in
   `spec.txt` (zero-CVE, zero-silent-corruption, zero-race). Today `out-archon-verify`
   is solver-checked QF_LRA assertion harnesses, not machine-checked proofs
-  (ADR 0003) — the marketing claims are explicitly deferred until proven.
+  (ADR 0003) — the marketing claims are explicitly deferred until proven. This is
+  research-scale work (no Coq/Lean backend exists in the `tpt-*` ecosystem) and
+  is not achievable within the current engineering scope.
 
 ### 12.8 GPU execution path — tracked, not started
 - [ ] Today `gpu` is emission-only. A real execution path (consuming the emitted

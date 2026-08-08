@@ -36,6 +36,27 @@ jobs:
       - name: Verify crates.io packaging (dry run)
         run: cargo publish -p tpt-archon-core --dry-run --allow-dirty
 
+  verify:
+    name: Formal-verification harness (eidos/telos/gpu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format (out-archon-verify)
+        run: cargo fmt --manifest-path crates/out-archon-verify/Cargo.toml -- --check
+      - name: Clippy (out-archon-verify)
+        run: cargo clippy -p out-archon-verify --all-targets -- -D warnings
+      # Phase 12.7: promote the verification harness from an opt-in,
+      # non-blocking check to a required gate. `out-archon-verify` is now a
+      # workspace member depending only on published crates.io ecosystem
+      # verifiers (no git/network exceptions), so it runs on the standard
+      # registry — failing here blocks the merge.
+      - name: Run verification harness
+        run: cargo test -p out-archon-verify
+
   pg-compat:
     name: Postgres comparison harness (opt-in, stabilizing)
     runs-on: ubuntu-latest

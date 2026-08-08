@@ -252,6 +252,10 @@ fn fmt_db_error(e: &DbError) -> String {
         DbError::ColumnCountMismatch => {
             "each UNION/INTERSECT/EXCEPT query must have the same number of columns".to_string()
         }
+        DbError::NotNullViolation(c) => format!("NOT NULL constraint violated: {c}"),
+        DbError::UniqueViolation(c) => format!("UNIQUE constraint violated: {c}"),
+        DbError::CheckViolation(c) => format!("CHECK constraint violated: {c}"),
+        DbError::ForeignKeyViolation(c) => format!("FOREIGN KEY constraint violated: {c}"),
         DbError::Exec(e) => format!("execution error: {e:?}"),
     }
 }

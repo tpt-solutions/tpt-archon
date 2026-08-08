@@ -5,9 +5,13 @@ use alloc::vec::Vec;
 
 use tpt_archon_core::btree::BTree;
 
+use super::schema::ForeignKey;
 use crate::executor::Value;
 use crate::mvcc;
-use crate::parser::{AlterTableOp, AlterTableStatement, CreateTableStatement, CreateViewStatement};
+use crate::parser::{
+    AlterTableOp, AlterTableStatement, ColumnConstraint, CreateTableStatement, CreateViewStatement,
+    TableConstraint,
+};
 
 use super::codec::{encode_row, try_decode_row};
 use super::schema::{ColumnType, DbError, Schema};
@@ -28,17 +32,100 @@ impl Database {
         }
         let mut columns = Vec::new();
         let mut types = Vec::new();
+        let mut not_null = Vec::new();
+        let mut primary_key: Option<Vec<String>> = None;
+        let mut unique = Vec::new();
+        let mut foreign_keys = Vec::new();
+        let mut checks = Vec::new();
+
         // First column is always the implicit row_id.
         columns.push("id".to_string());
         types.push(ColumnType::Int);
+
         for c in &ct.columns {
             columns.push(c.name.clone());
             types.push(c.ctype);
+            for cc in &c.constraints {
+                match cc {
+                    ColumnConstraint::NotNull => {
+                        if !not_null.contains(&c.name) {
+                            not_null.push(c.name.clone());
+                        }
+                    }
+                    ColumnConstraint::PrimaryKey => {
+                        if primary_key.is_some() {
+                            return Err(DbError::Unsupported(
+                                "multiple primary keys are not supported".to_string(),
+                            ));
+                        }
+                        primary_key = Some(vec![c.name.clone()]);
+                        if !not_null.contains(&c.name) {
+                            not_null.push(c.name.clone());
+                        }
+                    }
+                    ColumnConstraint::Unique => unique.push(vec![c.name.clone()]),
+                }
+            }
         }
+
+        for tc in &ct.constraints {
+            match tc {
+                TableConstraint::PrimaryKey(cols) => {
+                    if primary_key.is_some() {
+                        return Err(DbError::Unsupported(
+                            "multiple primary keys are not supported".to_string(),
+                        ));
+                    }
+                    for col in cols {
+                        if !columns.contains(col) {
+                            return Err(DbError::UnknownColumn(col.clone()));
+                        }
+                        if !not_null.contains(col) {
+                            not_null.push(col.clone());
+                        }
+                    }
+                    primary_key = Some(cols.clone());
+                }
+                TableConstraint::Unique(cols) => {
+                    for col in cols {
+                        if !columns.contains(col) {
+                            return Err(DbError::UnknownColumn(col.clone()));
+                        }
+                    }
+                    unique.push(cols.clone());
+                }
+                TableConstraint::ForeignKey {
+                    columns: fk_cols,
+                    ref_table,
+                    ref_columns,
+                } => {
+                    for col in fk_cols {
+                        if !columns.contains(col) {
+                            return Err(DbError::UnknownColumn(col.clone()));
+                        }
+                    }
+                    foreign_keys.push(ForeignKey {
+                        columns: fk_cols.clone(),
+                        ref_table: ref_table.clone(),
+                        ref_columns: ref_columns.clone(),
+                    });
+                }
+                TableConstraint::Check(expr) => checks.push(expr.clone()),
+            }
+        }
+
         self.tables.push((
             ct.table.clone(),
             TableStorage {
-                schema: Schema { columns, types },
+                schema: Schema {
+                    columns,
+                    types,
+                    not_null,
+                    primary_key,
+                    unique,
+                    foreign_keys,
+                    checks,
+                },
                 tree: BTree::new(),
                 next_row_id: 0,
                 mvcc: mvcc::MvccStore::new(),

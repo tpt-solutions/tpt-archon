@@ -17,6 +17,11 @@ impl SqlState {
     pub const UNDEFINED_COLUMN: Self = Self(*b"42703");
     pub const SYNTAX_ERROR: Self = Self(*b"42601");
     pub const DATA_EXCEPTION: Self = Self(*b"22000");
+    pub const INTEGRITY_CONSTRAINT_VIOLATION: Self = Self(*b"23000");
+    pub const NOT_NULL_VIOLATION: Self = Self(*b"23502");
+    pub const FOREIGN_KEY_VIOLATION: Self = Self(*b"23503");
+    pub const UNIQUE_VIOLATION: Self = Self(*b"23505");
+    pub const CHECK_VIOLATION: Self = Self(*b"23514");
     pub const INTERNAL_ERROR: Self = Self(*b"XX000");
     pub const ACTIVE_SQL_TRANSACTION: Self = Self(*b"25001");
     pub const NO_ACTIVE_SQL_TRANSACTION: Self = Self(*b"25000");
@@ -48,6 +53,10 @@ pub fn sqlstate_for_db_error(err: &DbError) -> SqlState {
         DbError::Unsupported(_) => SqlState::FEATURE_NOT_SUPPORTED,
         DbError::ColumnCountMismatch => SqlState::DATA_EXCEPTION,
         DbError::SubqueryCardinality(_) => SqlState::DATA_EXCEPTION,
+        DbError::NotNullViolation(_) => SqlState::NOT_NULL_VIOLATION,
+        DbError::UniqueViolation(_) => SqlState::UNIQUE_VIOLATION,
+        DbError::CheckViolation(_) => SqlState::CHECK_VIOLATION,
+        DbError::ForeignKeyViolation(_) => SqlState::FOREIGN_KEY_VIOLATION,
         DbError::Exec(_) => SqlState::INTERNAL_ERROR,
     }
 }

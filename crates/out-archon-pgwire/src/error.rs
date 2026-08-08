@@ -374,6 +374,10 @@ pub fn db_error_to_sqlstate(err: &DbError) -> &'static str {
         ColumnCountMismatch => DATA_EXCEPTION,
         RowNotFound(_) => NO_DATA,
         CorruptRow(_) => DATA_EXCEPTION,
+        NotNullViolation(_) => NOT_NULL_VIOLATION,
+        UniqueViolation(_) => UNIQUE_VIOLATION,
+        CheckViolation(_) => CHECK_VIOLATION,
+        ForeignKeyViolation(_) => FOREIGN_KEY_VIOLATION,
 
         // Type errors
         TypeMismatch => DATA_EXCEPTION,
@@ -507,5 +511,25 @@ mod tests {
             "RANGE frame with a numeric offset requires exactly one ORDER BY column".to_string(),
         ));
         assert_eq!(db_error_to_sqlstate(&err), sqlstate::FEATURE_NOT_SUPPORTED);
+    }
+
+    #[test]
+    fn test_constraint_violations_map_to_integrity_codes() {
+        assert_eq!(
+            db_error_to_sqlstate(&DbError::NotNullViolation("c".to_string())),
+            sqlstate::NOT_NULL_VIOLATION
+        );
+        assert_eq!(
+            db_error_to_sqlstate(&DbError::UniqueViolation("c".to_string())),
+            sqlstate::UNIQUE_VIOLATION
+        );
+        assert_eq!(
+            db_error_to_sqlstate(&DbError::CheckViolation("c".to_string())),
+            sqlstate::CHECK_VIOLATION
+        );
+        assert_eq!(
+            db_error_to_sqlstate(&DbError::ForeignKeyViolation("c".to_string())),
+            sqlstate::FOREIGN_KEY_VIOLATION
+        );
     }
 }

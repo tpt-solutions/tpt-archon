@@ -9,6 +9,7 @@ fn schema() -> Schema {
     Schema {
         columns: alloc::vec!["id".to_string(), "name".to_string(), "age".to_string()],
         types: alloc::vec![ColumnType::Int, ColumnType::Text, ColumnType::Int],
+        ..Default::default()
     }
 }
 
@@ -84,6 +85,7 @@ fn vector_topk_query() {
     let schema = Schema {
         columns: alloc::vec!["id".to_string(), "emb".to_string()],
         types: alloc::vec![ColumnType::Int, ColumnType::Vector],
+        ..Default::default()
     };
     let mut d = Database::new(schema);
     let rows = ["[1.0, 0.0]", "[0.0, 1.0]", "[0.9, 0.1]"];
@@ -103,6 +105,7 @@ fn vector_topk_with_where_filter() {
     let schema = Schema {
         columns: alloc::vec!["id".to_string(), "emb".to_string(), "tag".to_string(),],
         types: alloc::vec![ColumnType::Int, ColumnType::Vector, ColumnType::Text],
+        ..Default::default()
     };
     let mut d = Database::new(schema);
     // id=0: tag=a, closest to [1,0]
@@ -138,6 +141,7 @@ fn vector_topk_uses_ivfflat_index_past_threshold() {
     let schema = Schema {
         columns: alloc::vec!["id".to_string(), "emb".to_string()],
         types: alloc::vec![ColumnType::Int, ColumnType::Vector],
+        ..Default::default()
     };
     let mut d = Database::new(schema);
     for i in 0..n {
@@ -173,6 +177,7 @@ fn vector_index_maintained_on_update_and_delete() {
     let schema = Schema {
         columns: alloc::vec!["id".to_string(), "emb".to_string()],
         types: alloc::vec![ColumnType::Int, ColumnType::Vector],
+        ..Default::default()
     };
     let mut d = Database::new(schema);
     for i in 0..n {
@@ -236,6 +241,137 @@ fn create_table_and_insert() {
         )
         .unwrap();
     assert_eq!(r.rows.len(), 1);
+    assert_eq!(r.rows[0][0], Value::Int(0));
+}
+
+// ---------------------------------------------------------------------------
+// Integrity constraints (Phase 12.4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn not_null_constraint_rejects_null() {
+    let mut d = Database::empty();
+    d.execute(
+        &parse("CREATE TABLE u (pk INT PRIMARY KEY, name TEXT NOT NULL)"),
+        &[],
+    )
+    .unwrap();
+    d.execute(&parse("INSERT INTO u (pk, name) VALUES (1, 'a')"), &[])
+        .unwrap();
+    // Missing column (implicit NULL).
+    assert!(matches!(
+        d.execute_checked(&parse("INSERT INTO u (pk) VALUES (2)")),
+        Err(DbError::NotNullViolation(_))
+    ));
+    // Explicit NULL literal.
+    assert!(matches!(
+        d.execute_checked(&parse("INSERT INTO u (pk, name) VALUES (3, NULL)")),
+        Err(DbError::NotNullViolation(_))
+    ));
+}
+
+#[test]
+fn primary_key_enforces_uniqueness() {
+    let mut d = Database::empty();
+    d.execute(&parse("CREATE TABLE p (pk INT PRIMARY KEY, v TEXT)"), &[])
+        .unwrap();
+    d.execute(&parse("INSERT INTO p (pk, v) VALUES (1, 'a')"), &[])
+        .unwrap();
+    assert!(matches!(
+        d.execute_checked(&parse("INSERT INTO p (pk, v) VALUES (1, 'b')")),
+        Err(DbError::UniqueViolation(_))
+    ));
+    // NULL into a primary key column is rejected by NOT NULL semantics.
+    assert!(matches!(
+        d.execute_checked(&parse("INSERT INTO p (pk, v) VALUES (NULL, 'c')")),
+        Err(DbError::NotNullViolation(_))
+    ));
+}
+
+#[test]
+fn unique_constraint_enforces_distinct_values() {
+    let mut d = Database::empty();
+    d.execute(&parse("CREATE TABLE u (k INT UNIQUE, v TEXT)"), &[])
+        .unwrap();
+    d.execute(&parse("INSERT INTO u (k, v) VALUES (1, 'a')"), &[])
+        .unwrap();
+    d.execute(&parse("INSERT INTO u (k, v) VALUES (NULL, 'b')"), &[])
+        .unwrap();
+    // A second NULL is allowed (NULLs are not considered equal).
+    d.execute(&parse("INSERT INTO u (k, v) VALUES (NULL, 'c')"), &[])
+        .unwrap();
+    assert!(matches!(
+        d.execute_checked(&parse("INSERT INTO u (k, v) VALUES (1, 'd')")),
+        Err(DbError::UniqueViolation(_))
+    ));
+}
+
+#[test]
+fn check_constraint_rejects_violating_rows() {
+    let mut d = Database::empty();
+    d.execute(&parse("CREATE TABLE c (age INT CHECK (age >= 0))"), &[])
+        .unwrap();
+    d.execute(&parse("INSERT INTO c (age) VALUES (5)"), &[])
+        .unwrap();
+    assert!(matches!(
+        d.execute_checked(&parse("INSERT INTO c (age) VALUES (-1)")),
+        Err(DbError::CheckViolation(_))
+    ));
+}
+
+#[test]
+fn foreign_key_constraint_enforces_referential_integrity() {
+    let mut d = Database::empty();
+    d.execute(
+        &parse("CREATE TABLE dept (did INT PRIMARY KEY, name TEXT)"),
+        &[],
+    )
+    .unwrap();
+    d.execute(
+        &parse("CREATE TABLE emp (eid INT PRIMARY KEY, did INT REFERENCES dept(did))"),
+        &[],
+    )
+    .unwrap();
+    d.execute(
+        &parse("INSERT INTO dept (did, name) VALUES (1, 'eng')"),
+        &[],
+    )
+    .unwrap();
+    // Valid reference.
+    d.execute(&parse("INSERT INTO emp (eid, did) VALUES (10, 1)"), &[])
+        .unwrap();
+    // Dangling reference.
+    assert!(matches!(
+        d.execute_checked(&parse("INSERT INTO emp (eid, did) VALUES (11, 99)")),
+        Err(DbError::ForeignKeyViolation(_))
+    ));
+    // ON DELETE RESTRICT: cannot delete a referenced parent.
+    assert!(matches!(
+        d.execute_checked(&parse("DELETE FROM dept WHERE did = 1")),
+        Err(DbError::ForeignKeyViolation(_))
+    ));
+    // Once the child is gone, the parent can be deleted.
+    d.execute(&parse("DELETE FROM emp WHERE eid = 10"), &[])
+        .unwrap();
+    d.execute(&parse("DELETE FROM dept WHERE did = 1"), &[])
+        .unwrap();
+    assert_eq!(d.len(), 0);
+}
+
+#[test]
+fn constraint_violation_prevents_update_too() {
+    let mut d = Database::empty();
+    d.execute(&parse("CREATE TABLE u (pk INT PRIMARY KEY, v TEXT)"), &[])
+        .unwrap();
+    d.execute(&parse("INSERT INTO u (pk, v) VALUES (1, 'a')"), &[])
+        .unwrap();
+    d.execute(&parse("INSERT INTO u (pk, v) VALUES (2, 'b')"), &[])
+        .unwrap();
+    // Updating pk=2 to the already-taken value 1 must be rejected.
+    assert!(matches!(
+        d.execute_checked(&parse("UPDATE u SET pk = 1 WHERE pk = 2")),
+        Err(DbError::UniqueViolation(_))
+    ));
 }
 
 #[test]
