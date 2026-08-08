@@ -385,11 +385,12 @@ pub fn db_error_to_sqlstate(err: &DbError) -> &'static str {
         // Not yet implemented features
         Unsupported(_) => FEATURE_NOT_SUPPORTED,
 
-        // IO errors
+        // Executor errors
         Exec(executor::ExecError::UnknownColumn(_)) => UNDEFINED_COLUMN,
         Exec(executor::ExecError::TypeMismatch) => DATA_EXCEPTION,
         Exec(executor::ExecError::GroupByColumnNotFound(_)) => UNDEFINED_COLUMN,
         Exec(executor::ExecError::UnresolvedSubquery) => FEATURE_NOT_SUPPORTED,
+        Exec(executor::ExecError::Unsupported(_)) => FEATURE_NOT_SUPPORTED,
 
         // Internal errors
         UnknownView(_) => UNDEFINED_TABLE,
@@ -498,5 +499,13 @@ mod tests {
     fn test_arity_mismatch_maps_to_data_exception() {
         let err = DbError::ArityMismatch;
         assert_eq!(db_error_to_sqlstate(&err), sqlstate::DATA_EXCEPTION);
+    }
+
+    #[test]
+    fn test_exec_unsupported_maps_to_feature_not_supported() {
+        let err = DbError::Exec(tpt_archon_relational::executor::ExecError::Unsupported(
+            "RANGE frame with a numeric offset requires exactly one ORDER BY column".to_string(),
+        ));
+        assert_eq!(db_error_to_sqlstate(&err), sqlstate::FEATURE_NOT_SUPPORTED);
     }
 }

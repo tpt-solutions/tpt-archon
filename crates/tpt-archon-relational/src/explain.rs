@@ -133,7 +133,10 @@ pub fn explain_gpu(sql: &str, stats: TableStats) -> Result<String, ParseError> {
     out.push('\n');
     if plan.dispatch == Dispatch::Gpu {
         out.push_str("GPU IR (TPTIR, emitted — not executed):\n");
-        out.push_str(&crate::gpu::emit_topk(scan_rows(&plan)));
+        match crate::gpu::emit_for_plan(&plan) {
+            Some(tptir) => out.push_str(&tptir),
+            None => out.push_str(&crate::gpu::emit_topk(scan_rows(&plan))),
+        }
     } else {
         out.push_str(
             "GPU IR: not emitted (dispatch is CPU; build with `gpu` feature and a \
@@ -178,5 +181,19 @@ mod tests {
         )
         .unwrap();
         assert!(s.contains("func @vector_topk"));
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn explain_gpu_emits_aggregate_tptir_for_large_scan() {
+        let s = explain_gpu(
+            "SELECT SUM(amount) FROM huge",
+            TableStats {
+                row_count: 2_000_000,
+            },
+        )
+        .unwrap();
+        assert!(s.contains("func @aggregate_sum"));
+        assert!(s.contains("reduce_sum"));
     }
 }

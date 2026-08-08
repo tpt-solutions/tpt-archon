@@ -23,6 +23,13 @@ std = []
 # on Unix, CreateFileMappingW on Windows), so this needs no target gating and
 # is exercised on every OS in CI, not just Linux.
 mmap = ["std", "dep:memmap2"]
+# Writable (msync-ordered) mmap block device. A *separate* feature from read-
+# only `mmap` so existing read-only consumers are never silently handed write
+# capability. Implies `mmap` (which implies `std`). Deliberately core-crate-
+# only: not wired into the bridge/kernel zero-copy cache (see TODO.md Phase
+# 11.3) — `StorageEngine`'s write-ahead invariant stays enforced by the two-
+# operation ordering in `crate::storage`, untouched.
+mmap-write = ["mmap"]
 
 [dependencies]
 memmap2 = { version = "0.9", optional = true }

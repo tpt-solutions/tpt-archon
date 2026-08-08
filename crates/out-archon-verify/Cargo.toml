@@ -33,7 +33,7 @@ tpt-telos-parser = "0.1.1"
 tpt-gpu-ir-spec = "0.1.0"
 
 [dev-dependencies]
-tpt-archon-relational = { path = "../tpt-archon-relational", default-features = false, features = ["std"] }
+tpt-archon-relational = { path = "../tpt-archon-relational", default-features = false, features = ["std", "gpu"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

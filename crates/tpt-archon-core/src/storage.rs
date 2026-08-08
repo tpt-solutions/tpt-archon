@@ -12,8 +12,11 @@
 use alloc::vec::Vec;
 
 use crate::block::{BlockDevice, BlockId, StorageError};
-use crate::page::{BufferPool, PAGE_SIZE};
+use crate::page::{encode_page_block, BufferPool, PAGE_SIZE};
 use crate::wal::{RecordKind, Wal};
+
+#[cfg(feature = "std")]
+use std::io::{Read, Seek, Write};
 
 /// A storage engine: a buffer pool whose page modifications are first recorded
 /// in a write-ahead log.
@@ -61,11 +64,38 @@ impl<D: BlockDevice> StorageEngine<D> {
         Ok(frame.as_bytes())
     }
 
-    /// Commits the current batch of writes: appends a commit marker to the WAL,
-    /// flushes the log-carrying pool pages, and syncs the device.
-    pub fn commit(&mut self) -> Result<(), StorageError> {
+    /// Appends a `Commit` marker to the in-memory WAL — the closing record of
+    /// the write-ahead sequence — without flushing any storage. Durable
+    /// persistence of the log itself and of the data pages is left to the
+    /// caller (see the `Database` std facade, which fsyncs the WAL sidecar file
+    /// *before* flushing the data device so the write-ahead invariant holds at
+    /// the fsync boundary, not just logically).
+    pub fn append_commit(&mut self) -> Result<(), StorageError> {
         self.wal.append(RecordKind::Commit, 0, &[]);
+        Ok(())
+    }
+
+    /// Flushes all dirty pool frames to the device and syncs it (the data-
+    /// durable half of a commit).
+    pub fn flush_data(&mut self) -> Result<(), StorageError> {
         self.pool.flush_all()
+    }
+
+    /// Replaces the in-memory WAL with a fresh, empty log. Used after a
+    /// checkpoint (e.g. on `Database::open` after replaying a sidecar WAL) so
+    /// subsequent appends start clean and the persisted sidecar stays bounded.
+    pub fn reset_wal(&mut self) {
+        self.wal = Wal::new();
+    }
+
+    /// Commits the current batch of writes: appends a commit marker and flushes
+    /// the data device. The WAL remains in-memory; callers wanting a durable,
+    /// fsynced log (crash-recoverable file database) must persist
+    /// [`wal_bytes`](StorageEngine::wal_bytes) to a sidecar and fsync it
+    /// *before* calling this (see the `Database` std facade).
+    pub fn commit(&mut self) -> Result<(), StorageError> {
+        self.append_commit()?;
+        self.flush_data()
     }
 
     /// Returns the raw WAL bytes, suitable for persisting to a dedicated log
@@ -102,13 +132,10 @@ impl<D: BlockDevice> StorageEngine<D> {
                 for (block_id, payload) in pending.drain(..) {
                     // Apply the page image directly to the device. We bypass
                     // the pool so recovery is independent of pool capacity
-                    // and order.
-                    if self
-                        .pool
-                        .device_mut()
-                        .write_block(block_id, &payload)
-                        .is_ok()
-                    {
+                    // and order. The page is encoded with its CRC so the
+                    // on-disk block matches the format the pool reads.
+                    let block = encode_page_block(&payload);
+                    if self.pool.device_mut().write_block(block_id, &block).is_ok() {
                         applied += 1;
                     }
                 }
@@ -245,38 +272,119 @@ mod tests {
 /// database file and read/write fixed-size pages with the WAL write-ahead
 /// guarantee, without touching the buffer pool or WAL directly.
 ///
+/// Durability model: every [`put`](Database::put) records the page in the
+/// in-memory WAL, **fsyncs the WAL to a sidecar `<path>.wal` file first**, and
+/// only then flushes + fsyncs the data file. That is the write-ahead invariant
+/// enforced at the `fsync` boundary (not just logically) — a crash between the
+/// two fsyncs leaves a durable WAL record whose page image is replayed on the
+/// next [`open`](Database::open). [`open`] replays any committed records found
+/// in the sidecar WAL into the data file, then checkpoints (truncates) it.
+///
 /// Only available with the default `std` feature.
 #[cfg(feature = "std")]
 pub struct Database {
     engine: StorageEngine<crate::block::FileBlockDevice>,
+    wal_file: std::fs::File,
 }
 
 #[cfg(feature = "std")]
 impl Database {
-    /// Opens an existing database file, inferring the block count from the
-    /// file size.
-    pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, StorageError> {
-        let device = crate::block::FileBlockDevice::open(path)?;
-        Ok(Self {
-            engine: StorageEngine::new(device, 64),
-        })
+    /// Maps a database path to its sidecar WAL file (`<path>.wal`).
+    fn wal_path_for<P: AsRef<std::path::Path>>(path: P) -> std::path::PathBuf {
+        let p = path.as_ref();
+        let mut s = p.as_os_str().to_os_string();
+        s.push(".wal");
+        std::path::PathBuf::from(s)
     }
 
-    /// Creates (or resizes) a database file with `block_count` blocks.
+    fn io_err(e: std::io::Error) -> StorageError {
+        StorageError::Io {
+            kind: e.kind() as u8,
+        }
+    }
+
+    /// Opens an existing database file, inferring the block count from the
+    /// file size, and replays + checkpoints any committed records left in the
+    /// sidecar WAL from a previous run.
+    pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, StorageError> {
+        let device = crate::block::FileBlockDevice::open(&path)?;
+        let wal_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(Self::wal_path_for(&path))
+            .map_err(Self::io_err)?;
+        let mut db = Self {
+            engine: StorageEngine::new(device, 64),
+            wal_file,
+        };
+        // Replay any committed records from a previous run, then checkpoint.
+        let mut buf = Vec::new();
+        db.wal_file
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(Self::io_err)?;
+        db.wal_file.read_to_end(&mut buf).map_err(Self::io_err)?;
+        if !buf.is_empty() {
+            db.engine.recover(&buf)?;
+            // `recover` writes pages via `write_block` (no sync) — make the
+            // replayed state durable before we truncate the WAL.
+            db.engine.flush_data()?;
+            // Checkpoint: discard the replayed log and start a fresh in-memory
+            // WAL so subsequent puts don't re-replay old records.
+            db.engine.reset_wal();
+            db.wal_file
+                .seek(std::io::SeekFrom::Start(0))
+                .map_err(Self::io_err)?;
+            db.wal_file.set_len(0).map_err(Self::io_err)?;
+        }
+        Ok(db)
+    }
+
+    /// Creates (or resizes) a database file with `block_count` blocks, and a
+    /// fresh (truncated) sidecar WAL.
     pub fn create<P: AsRef<std::path::Path>>(
         path: P,
         block_count: u64,
     ) -> Result<Self, StorageError> {
-        let device = crate::block::FileBlockDevice::create(path, block_count)?;
+        let device = crate::block::FileBlockDevice::create(&path, block_count)?;
+        let wal_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(Self::wal_path_for(&path))
+            .map_err(Self::io_err)?;
         Ok(Self {
             engine: StorageEngine::new(device, 64),
+            wal_file,
         })
     }
 
-    /// Writes a page and commits it durably (WAL record + page flush + sync).
+    /// Persists the in-memory WAL to the sidecar file and fsyncs it.
+    fn persist_wal(&mut self) -> Result<(), StorageError> {
+        let bytes = self.engine.wal_bytes().to_vec();
+        self.wal_file
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(Self::io_err)?;
+        self.wal_file.write_all(&bytes).map_err(Self::io_err)?;
+        self.wal_file
+            .set_len(bytes.len() as u64)
+            .map_err(Self::io_err)?;
+        self.wal_file
+            .sync_all()
+            .map_err(|_| StorageError::SyncFailed)
+    }
+
+    /// Writes a page and commits it durably: WAL record → **fsync WAL sidecar
+    /// first** → flush + fsync data file. This honors the write-ahead invariant
+    /// at the `fsync` boundary, so a crash between the two fsyncs is recovered
+    /// by replaying the durable WAL on the next [`open`](Database::open).
     pub fn put(&mut self, block_id: BlockId, page: &[u8]) -> Result<(), StorageError> {
         self.engine.write_page(block_id, page)?;
-        self.engine.commit()
+        self.engine.append_commit()?;
+        self.persist_wal()?;
+        self.engine.flush_data()
     }
 
     /// Reads a page through the buffer pool.
@@ -314,6 +422,7 @@ mod db_tests {
     #[test]
     fn create_open_put_and_get() {
         let path = temp_db("create");
+        let wal = Database::wal_path_for(&path);
         {
             let mut db = Database::create(&path, 4).unwrap();
             db.put(1, &page_of(0x55)).unwrap();
@@ -323,5 +432,79 @@ mod db_tests {
             assert_eq!(db.get(1).unwrap()[0], 0x55);
         }
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&wal);
+    }
+
+    #[test]
+    fn reopen_replays_committed_writes_from_wal_file() {
+        let path = temp_db("walreplay");
+        let wal = Database::wal_path_for(&path);
+        {
+            let mut db = Database::create(&path, 4).unwrap();
+            db.put(0, &page_of(0x01)).unwrap();
+            db.put(2, &page_of(0x02)).unwrap();
+        }
+        // The sidecar WAL was written and fsynced by the puts above.
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+        {
+            let mut db = Database::open(&path).unwrap();
+            assert_eq!(db.get(0).unwrap()[0], 0x01);
+            assert_eq!(db.get(2).unwrap()[0], 0x02);
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&wal);
+    }
+
+    #[test]
+    fn torn_wal_tail_is_tolerated_on_reopen() {
+        let path = temp_db("waltorn");
+        let wal = Database::wal_path_for(&path);
+        {
+            let mut db = Database::create(&path, 4).unwrap();
+            db.put(0, &page_of(0xAB)).unwrap();
+        }
+        // Corrupt the tail of the sidecar WAL to simulate a crash mid-append.
+        {
+            let mut f = std::fs::OpenOptions::new().write(true).open(&wal).unwrap();
+            let len = std::fs::metadata(&wal).unwrap().len();
+            f.seek(std::io::SeekFrom::Start(len - 3)).unwrap();
+            f.write_all(&[0xFF, 0xFF, 0xFF]).unwrap();
+        }
+        // Reopen must not panic and must keep the committed page (already
+        // durable on the data device; the torn WAL is simply ignored).
+        let mut db = Database::open(&path).unwrap();
+        assert_eq!(db.get(0).unwrap()[0], 0xAB);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&wal);
+    }
+
+    #[test]
+    fn wal_replay_populates_data_device_after_crash_before_data_flush() {
+        // Models the write-ahead window: the WAL was fsynced but the data pages
+        // were NOT yet flushed (crash between log-durable and data-durable).
+        // Reopening must recover the page image from the on-disk WAL.
+        let path = temp_db("walonly");
+        let wal = Database::wal_path_for(&path);
+        {
+            // Create the data file (all zeros), then plant a committed WAL in
+            // the sidecar (simulating a WAL fsynced before the data flush).
+            let _ = Database::create(&path, 4).unwrap();
+            let dev = crate::block::InMemoryBlockDevice::new(4);
+            let mut e = StorageEngine::new(dev, 2);
+            e.write_page(1, &page_of(0x5A)).unwrap();
+            e.append_commit().unwrap();
+            let bytes = e.wal_bytes().to_vec();
+            let mut f = std::fs::OpenOptions::new().write(true).open(&wal).unwrap();
+            f.seek(std::io::SeekFrom::Start(0)).unwrap();
+            f.write_all(&bytes).unwrap();
+            f.set_len(bytes.len() as u64).unwrap();
+            f.sync_all().unwrap();
+        }
+        // Open replays the WAL into the zeroed data device.
+        let mut db = Database::open(&path).unwrap();
+        assert_eq!(db.get(1).unwrap()[0], 0x5A);
+        assert_eq!(db.get(0).unwrap()[0], 0x00);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&wal);
     }
 }

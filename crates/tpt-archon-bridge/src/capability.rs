@@ -47,6 +47,13 @@ pub enum Resource {
     Page(u64),
     /// An IPC channel identified by channel id.
     Channel(u64),
+    /// A hardware device (e.g. a NIC, disk controller) identified by device
+    /// id. Gating who may stand up a driver task for a device, and who may
+    /// inject interrupts into its line, is enforced through this variant
+    /// (see `tpt-archon-kernel`'s driver framework). A *read* capability
+    /// authorizes running the driver; a *write* capability authorizes
+    /// injecting interrupts.
+    Device(u64),
 }
 
 /// An unforgeable, revocable capability token.
@@ -200,5 +207,26 @@ mod tests {
         let cap = a.mint(Resource::Page(0), Right::Read);
         // b never minted this serial (b is empty).
         assert!(!b.validate(&cap));
+    }
+
+    #[test]
+    fn device_resource_mint_authorize_revoke() {
+        let mut issuer = CapabilityIssuer::new();
+        let read = issuer.mint(Resource::Device(7), Right::Read);
+        let write = issuer.mint(Resource::Device(7), Right::Write);
+
+        // Read authorizes running the driver; write authorizes injecting
+        // interrupts (see `tpt-archon-kernel::driver`).
+        assert!(issuer.authorizes(&read, Resource::Device(7), Right::Read));
+        assert!(!issuer.authorizes(&read, Resource::Device(7), Right::Write));
+        assert!(issuer.authorizes(&write, Resource::Device(7), Right::Write));
+        assert!(!issuer.authorizes(&write, Resource::Device(7), Right::Read));
+
+        // A different device id is a different resource.
+        assert!(!issuer.authorizes(&read, Resource::Device(8), Right::Read));
+
+        // Revocation kills both liveness and structural authorization.
+        issuer.revoke(&read);
+        assert!(!issuer.authorizes(&read, Resource::Device(7), Right::Read));
     }
 }

@@ -63,6 +63,11 @@ pub enum StorageError {
     /// The operation is not supported by this backend (e.g. writing to a
     /// read-only [`MmapBlockDevice`](crate::block::MmapBlockDevice)).
     Unsupported,
+    /// A page read back from storage failed its CRC32 checksum — the block was
+    /// silently corrupted on disk (bit rot, torn write, truncated tail). The
+    /// page is not returned; callers must treat this as data loss and typically
+    /// fail the operation rather than serving corrupt bytes.
+    Corrupt,
 }
 
 impl fmt::Display for StorageError {
@@ -89,6 +94,9 @@ impl fmt::Display for StorageError {
             StorageError::Unsupported => {
                 write!(f, "operation not supported by this backend")
             }
+            StorageError::Corrupt => {
+                write!(f, "page failed CRC32 checksum: data corrupted on storage")
+            }
         }
     }
 }
@@ -105,7 +113,11 @@ impl std::error::Error for StorageError {}
 /// later phases.
 pub trait BlockDevice {
     /// The size of a single block, in bytes. 4 KiB by default.
-    const BLOCK_SIZE: usize = 4096;
+    // On-disk block = logical [`PAGE_SIZE`](crate::page::PAGE_SIZE) page plus a
+    // trailing [`PAGE_CRC`](crate::checksum::PAGE_CRC) CRC32 checksum. The page
+    // frame stays 4096 bytes for all upper layers; only the persisted block
+    // grows by the checksum bytes.
+    const BLOCK_SIZE: usize = 4096 + crate::checksum::PAGE_CRC;
 
     /// Reads block `block_id` into `buffer`.
     ///
@@ -136,3 +148,8 @@ pub use file::FileBlockDevice;
 mod mmap;
 #[cfg(all(feature = "std", feature = "mmap"))]
 pub use mmap::MmapBlockDevice;
+
+#[cfg(all(feature = "std", feature = "mmap-write"))]
+mod mmap_mut;
+#[cfg(all(feature = "std", feature = "mmap-write"))]
+pub use mmap_mut::MmapWritableBlockDevice;

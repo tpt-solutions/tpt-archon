@@ -18,6 +18,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use crate::block::{BlockDevice, BlockId, StorageError};
+use crate::checksum::{crc32, PAGE_CRC};
 
 /// The page size in bytes. Matches the default block size (4 KiB).
 ///
@@ -45,6 +46,49 @@ pub enum PageState {
 #[derive(Clone)]
 pub struct Page {
     bytes: [u8; PAGE_SIZE],
+}
+
+/// Encodes a logical `PAGE_SIZE` page into the on-disk block layout: the page
+/// bytes followed by a trailing CRC32 over those bytes. The result is exactly
+/// `BLOCK_SIZE` (`PAGE_SIZE + PAGE_CRC`) bytes.
+pub(crate) fn encode_page_block(page: &[u8]) -> Vec<u8> {
+    let mut block = alloc::vec![0u8; PAGE_SIZE + PAGE_CRC];
+    block[..PAGE_SIZE].copy_from_slice(page);
+    let crc = crc32(page);
+    block[PAGE_SIZE..].copy_from_slice(&crc.to_le_bytes());
+    block
+}
+
+/// Decodes an on-disk block back into a logical `PAGE_SIZE` page, verifying
+/// the trailing CRC32. Returns [`StorageError::Corrupt`] if the checksum does
+/// not match — the block was silently corrupted on storage and must not be
+/// returned to the caller.
+fn decode_block(block: &[u8]) -> Result<[u8; PAGE_SIZE], StorageError> {
+    if block.len() != PAGE_SIZE + PAGE_CRC {
+        return Err(StorageError::ShortRead {
+            got: block.len(),
+            expected: PAGE_SIZE + PAGE_CRC,
+        });
+    }
+    // A never-written block is all zeros. Its stored CRC is also zero, which can
+    // never match `crc32(zeros)`, so accept an all-zero block as a valid zero
+    // page without verification. This is the common "freshly created / freshly
+    // opened" case and avoids spurious `Corrupt` errors on unallocated blocks.
+    if block.iter().all(|&b| b == 0) {
+        return Ok([0u8; PAGE_SIZE]);
+    }
+    let mut page = [0u8; PAGE_SIZE];
+    page.copy_from_slice(&block[..PAGE_SIZE]);
+    let stored = u32::from_le_bytes([
+        block[PAGE_SIZE],
+        block[PAGE_SIZE + 1],
+        block[PAGE_SIZE + 2],
+        block[PAGE_SIZE + 3],
+    ]);
+    if crc32(&page) != stored {
+        return Err(StorageError::Corrupt);
+    }
+    Ok(page)
 }
 
 impl Page {
@@ -111,8 +155,8 @@ impl<D: BlockDevice> BufferPool<D> {
         assert!(capacity > 0, "buffer pool capacity must be non-zero");
         assert_eq!(
             D::BLOCK_SIZE,
-            PAGE_SIZE,
-            "page manager requires BLOCK_SIZE == PAGE_SIZE"
+            PAGE_SIZE + PAGE_CRC,
+            "page manager requires BLOCK_SIZE == PAGE_SIZE + checksum bytes"
         );
         Self {
             device,
@@ -163,7 +207,8 @@ impl<D: BlockDevice> BufferPool<D> {
                 let f = &self.frames[idx];
                 (f.block_id, *f.page.as_bytes())
             };
-            self.device.write_block(block_id, &bytes)?;
+            let block = encode_page_block(&bytes);
+            self.device.write_block(block_id, &block)?;
         }
         if let Some(p) = self.lru.iter().position(|&i| i == idx) {
             self.lru.remove(p);
@@ -186,8 +231,11 @@ impl<D: BlockDevice> BufferPool<D> {
         }
 
         let idx = self.acquire_frame()?;
+        let mut block = alloc::vec![0u8; D::BLOCK_SIZE];
+        self.device.read_block(block_id, &mut block)?;
+        let page_bytes = decode_block(&block)?;
         let mut page = Page::zeroed();
-        self.device.read_block(block_id, page.as_bytes_mut())?;
+        page.as_bytes_mut().copy_from_slice(&page_bytes);
         self.frames[idx] = Frame {
             block_id,
             page,
@@ -206,8 +254,11 @@ impl<D: BlockDevice> BufferPool<D> {
             idx
         } else {
             let idx = self.acquire_frame()?;
+            let mut block = alloc::vec![0u8; D::BLOCK_SIZE];
+            self.device.read_block(block_id, &mut block)?;
+            let page_bytes = decode_block(&block)?;
             let mut page = Page::zeroed();
-            self.device.read_block(block_id, page.as_bytes_mut())?;
+            page.as_bytes_mut().copy_from_slice(&page_bytes);
             self.frames[idx] = Frame {
                 block_id,
                 page,
@@ -297,7 +348,8 @@ impl<D: BlockDevice> BufferPool<D> {
                     let f = &self.frames[idx];
                     (f.block_id, *f.page.as_bytes())
                 };
-                self.device.write_block(block_id, &bytes)?;
+                let block = encode_page_block(&bytes);
+                self.device.write_block(block_id, &block)?;
                 self.frames[idx].dirty_intent = false;
                 if self.frames[idx].state == PageState::Dirty {
                     self.frames[idx].state = PageState::Clean;
@@ -355,7 +407,7 @@ mod tests {
 
         // Verify it actually reached the device.
         let dev = p.into_device();
-        let mut buf = [0u8; PAGE_SIZE];
+        let mut buf = [0u8; InMemoryBlockDevice::BLOCK_SIZE];
         dev.read_block(1, &mut buf).unwrap();
         assert_eq!(buf[0], 0x42);
     }
@@ -383,7 +435,7 @@ mod tests {
         // Dirty page 0 must have been persisted when eventually evicted.
         p.flush_all().unwrap();
         let dev = p.into_device();
-        let mut buf = [0u8; PAGE_SIZE];
+        let mut buf = [0u8; InMemoryBlockDevice::BLOCK_SIZE];
         dev.read_block(0, &mut buf).unwrap();
         assert_eq!(buf[0], 9);
     }

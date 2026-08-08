@@ -24,6 +24,9 @@ io-uring-backend = ["dep:io-uring", "std"]
 # `tpt-archon-bridge`. Cross-platform (unlike `io-uring-backend`); see that
 # crate's feature comment.
 mmap = ["tpt-archon-bridge/mmap", "std"]
+# Writable (msync-ordered) mmap block device, forwarded from
+# `tpt-archon-bridge`. Cross-platform; see that crate's feature comment.
+mmap-write = ["tpt-archon-bridge/mmap-write", "std"]
 
 [dependencies]
 tpt-archon-core = { path = "../tpt-archon-core", version = "0.1.0", default-features = false }

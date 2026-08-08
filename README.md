@@ -18,14 +18,26 @@ its wire-level behavior is checked against real Postgres by a comparison
 suite (`out-archon-pgcompat`, Phase 8 Track C). External verification crates
 (`tpt-eidos-verifier`, `tpt-telos-*`, `tpt-gpu-ir-spec`, all published to
 crates.io) are wired in via the non-published `crates/out-archon-verify`
-harness, not the shippable crates. GPU support is
-IR-emission only (no runtime). A real Linux `io_uring` backend exists behind
-an opt-in feature (`tpt-archon-kernel`'s `io-uring-backend`), and a real,
-cross-platform, read-only `mmap` zero-copy path exists behind another
-(`mmap`, in `tpt-archon-core`/`-bridge`/`-kernel`) — writable mmap and
-bare-metal driver support are still deferred. Nothing here is
-production-ready; see [`TODO.md`](TODO.md) for the live checklist and what
-remains (e.g. GPU device execution, `mmap` backend, publishing).
+harness, not the shippable crates. GPU support is IR-emission only (no runtime), but now covers both the
+vectorized top-k scan and single-column aggregates (`SUM`/`MIN`/`MAX`/`AVG`/
+`COUNT`) — the engine's `EXPLAIN` GPU path emits the TPTIR for the dominant
+operation. A real Linux `io_uring` backend exists behind an opt-in feature
+(`tpt-archon-kernel`'s `io-uring-backend`), a real, cross-platform, read-only
+`mmap` zero-copy path exists behind another (`mmap`, in
+`tpt-archon-core`/`-bridge`/`-kernel`), and a writable `mmap` block device now
+exists behind `mmap-write` — deliberately core-crate-only (not wired into the
+bridge/kernel zero-copy cache) so `StorageEngine`'s write-ahead invariant stays
+intact; `sync` (`flush_range`) is the durability boundary. A user-space driver
+framework v1 (`tpt-archon-kernel::driver`) also exists: an interrupt →
+capability-checked-IPC plumbing proven with a sandbox `MockInterruptSource`,
+gated by the new `Resource::Device` capability — real UIO/VFIO device wrapping
+and bare-metal interrupt handling remain explicit v2 follow-ups. The four
+shippable crates are published to crates.io. It is still not production-ready: a
+durable, `fsync`'d WAL now backs the file `Database` (write-ahead honored at the
+`fsync` boundary, replay + checkpoint on open — Phase 12.1), but real concurrent
+execution, PostgreSQL wire completeness (`pg_catalog`, SCRAM, TLS), constraints/
+referential integrity, replication/HA, and machine-checked formal proofs all
+remain — see [`TODO.md`](TODO.md) Phase 12 for the live checklist.
 
 | Phase | Crate | Purpose | Status |
 |---|---|---|---|

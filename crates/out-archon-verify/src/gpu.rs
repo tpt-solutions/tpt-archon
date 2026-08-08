@@ -90,3 +90,32 @@ fn emitted_text_round_trips_block_labels() {
     let labels = tpt_gpu_ir_spec::text::parse(&text).expect("parses emitted text");
     assert_eq!(labels, vec!["entry".to_string()]);
 }
+
+/// Smoke test for the relational engine's aggregate lowering — proves the
+/// `SUM`/`MIN`/`MAX`/`AVG`/`COUNT` ops the SQL surface can reach emit valid
+/// TPTIR (and that `AVG` lowers to `reduce_sum` + `divf`, `COUNT` to the
+/// `count` custom op rather than `reduce_sum`).
+#[test]
+fn relational_aggregate_lowers_to_tptir() {
+    use tpt_archon_relational::gpu::emit_aggregate;
+    use tpt_archon_relational::parser::AggregateFunc;
+
+    let sum = emit_aggregate(AggregateFunc::Sum, 1024);
+    assert!(sum.contains("func @aggregate_sum"));
+    assert!(sum.contains("reduce_sum"));
+
+    let avg = emit_aggregate(AggregateFunc::Avg, 1024);
+    assert!(avg.contains("func @aggregate_avg"));
+    assert!(avg.contains("reduce_sum"));
+    assert!(avg.contains("divf"));
+
+    let count = emit_aggregate(AggregateFunc::Count, 1024);
+    assert!(count.contains("func @aggregate_count"));
+    assert!(count.contains("count"));
+    assert!(!count.contains("reduce_sum"));
+
+    // The emitted aggregate text parses back through the spec's structural
+    // parser (the same path an external GPU backend would use).
+    let labels = tpt_gpu_ir_spec::text::parse(&avg).expect("parses emitted text");
+    assert_eq!(labels, vec!["entry".to_string()]);
+}

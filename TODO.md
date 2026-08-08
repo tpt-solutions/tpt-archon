@@ -105,10 +105,10 @@ Capability-based microkernel with unified page cache. Depends on
 - [x] `tpt-telos` formal verification: scheduler cannot deadlock (`formal-proofs/scheduler.telos` + `out-archon-verify` — round-robin poll keeps runnable count monotone on `Pending` and drains on `Ready`, so with one eventually-`Ready` task progress is forced and no held-resource cycle exists)
 - [x] Memory management: kernel page cache == DB buffer pool (literally the same allocation, via the bridge's unified page cache trait)
 - [x] Memory-mapped file backing with zero-copy access — **read path**: `tpt-archon-core::block::MmapBlockDevice` (real `mmap`(2)/`CreateFileMappingW` via the `memmap2` crate, opt-in `mmap` Cargo feature, cross-platform — no target gating needed), wired through `tpt-archon-bridge::page_cache::MmapPageSource`/`MmapPageCache` and `tpt-archon-kernel::memory::UnifiedMemory::map_read_zero_copy` — genuinely zero-copy: the returned reference points straight into the OS mapping, no `BufferPool`, no allocation. Deliberately a separate, additive trait (not a `UnifiedPageCache` impl), so the type system — not a runtime check — proves a reader-only mmap cache can never mutate storage.
-- [ ] Memory-mapped **write** path (`msync`-ordered writable mmap) — deliberately deferred. `StorageEngine` (`crates/tpt-archon-core/src/storage.rs`) enforces a write-ahead invariant (WAL record durable before the corresponding page write is applied) via simple, easy-to-reason-about ordering of two independent operations; a writable mmap's dirty pages are flushed to disk on the OS's own schedule, which would require hand-rolled `msync` calls at exactly the right points to preserve that ordering — a correctness hazard not worth taking without a concrete need (e.g. an LMDB-style copy-on-write/shadow-paging redesign). The invariant now has a `tpt-telos`-formal backstop (`formal-proofs/wal.telos`, solver-checked in `out-archon-verify`, modeling both write-ahead ordering `applied <= logged` and commit-gated replay durability), so the "no proof backstop" reason for deferring is resolved — the durability-hazard reasoning above still stands on its own.
+- [x] Memory-mapped **write** path (`msync`-ordered writable mmap) — **closed in Phase 11.3** (`crates/tpt-archon-core/src/block/mmap_mut.rs`: `MmapWritableBlockDevice`, `mmap-write` feature, core-crate-only). The durability-hazard reasoning in the original defer note still stands, which is exactly why the new device stays out of the bridge/kernel zero-copy cache and `StorageEngine`'s two-operation ordering (`write_page`/`commit`) is untouched — `sync` (`flush_range`) is the durability boundary, and `StorageEngine` never uses this device. The `tpt-telos` write-ahead formal backstop is unaffected.
 - [x] Capability-based access control enforced at the memory-mapping layer
 - [x] IPC message passing: capability-bearing messages between isolated user-space services
-- [ ] User-space driver framework: kernel translates hardware interrupts into safe IPC messages; drivers are safe Rust with minimal `unsafe` (deferred until the user-space model is validated end-to-end)
+- [x] User-space driver framework: kernel translates hardware interrupts into safe IPC messages; drivers are safe Rust with minimal `unsafe` — **closed in Phase 11.2** (sandbox-testable v1: `crates/tpt-archon-kernel/src/driver.rs` `Driver`/`DriverTask`/`MockInterruptSource`, capability-gated via the new `Resource::Device`). Real UIO/VFIO device wrapping, real interrupt controllers, bare-metal targets, `no_std` interrupt handlers, and driver priority/preemption remain explicit v2 follow-ups — not silently dropped.
 - [x] Risk mitigation per `spec.txt`: validate architecture running as a user-space process on Linux before attempting any bare-metal/hardware driver work (all kernel work is user-space-first by construction)
 
 ### crates.io readiness — `tpt-archon-kernel`
@@ -552,4 +552,209 @@ data-safety track. No new crates; touches `tpt-archon-relational` (and
   UNBOUNDED PRECEDING .. CURRENT ROW`, grouping tied `ORDER BY` peers (Postgres
   semantics) in `executor/window.rs`; `Rows` keeps physical-position logic.
 - [x] Update `tests/slt/supported/window_functions.slt` and the `window_*`
-  unit tests for peer-group behavior; add `RANGE` numeric-offset tests.
+   unit tests for peer-group behavior; add `RANGE` numeric-offset tests.
+
+### 10.5 Follow-up: keep pgwire's exhaustive SQLSTATE match in sync (done 2026-08-08)
+- The `RANGE` work (10.4) added `ExecError::Unsupported` to
+  `tpt-archon-relational`, which broke `cargo build --workspace` /
+  `cargo test --workspace`: `out-archon-pgwire`'s `db_error_to_sqlstate` is a
+  deliberately-exhaustive match (no wildcard arm, per Phase 8 B2), so the new
+  variant became a compile error rather than a silent wrong SQLSTATE. The
+  follow-up commit that "made it CI-clean" was validated with
+  `-p tpt-archon-relational` and missed it, so `master` shipped red.
+- [x] Add the missing `Exec(ExecError::Unsupported(_)) => FEATURE_NOT_SUPPORTED`
+  arm to `db_error_to_sqlstate` (matching the two existing `0A000` precedents in
+  the same match), and a unit test `test_exec_unsupported_maps_to_feature_not_supported`
+  so a future missing arm is caught by `cargo test --workspace`.
+- [x] Removed the stale `"crates/out-archon-pgwire"` entry from the root
+  `Cargo.toml` `exclude` list — it was already in `members`, so Cargo ignored
+  the exclude, but it made the crate look excluded from the `--workspace` gate
+  (the misconception that let this regression ship). `members`/`exclude` no
+  longer contradict each other.
+- Lesson carried into AGENTS.md/CLAUDE.md convention: adding/removing a variant
+  in `DbError` or `ExecError` requires updating pgwire's SQLSTATE match, and
+  local pre-push validation must use `--workspace`, never a single `-p` crate.
+
+---
+
+## Phase 11 — Deferred-item closure: writable mmap, driver framework, GPU aggregations (2026-08-08)
+
+Closes the three remaining unchecked items from Phase 2b/Phase 3 (writable
+mmap path, user-space driver framework, GPU aggregations/ML UDFs). Each is
+scoped to the smallest correct v1 rather than the full eventual feature —
+see the plan file for the full design (grounded in Explore-agent findings
+against the actual code, not just the TODO wording).
+
+### 11.1 GPU aggregation lowering (`tpt-archon-relational`)
+Confirmed **not** blocked on the external `tpt-gpu` repo — `tpt-gpu-ir-spec`
+0.1.0 already has the op vocabulary needed (`ReduceSum`/`ReduceMin`/
+`ReduceMax`/`Divf`/`Op::Custom`). ML-UDF (`Gemm`) lowering deliberately
+deferred — no UDF syntax exists anywhere in the SQL surface to justify it.
+- [x] `lower_aggregate`/`emit_aggregate` in `gpu.rs`, mirroring the existing
+  `lower_topk`/`emit_topk` pattern: `Sum`/`Min`/`Max` -> `ReduceSum`/
+  `ReduceMin`/`ReduceMax`; `Avg` -> `ReduceSum` + `Divf`; `Count` ->
+  `Op::Custom("count")` (not `ReduceSum`, which would be silently wrong).
+- [x] `emit_for_plan(plan: &Plan) -> Option<String>` in `gpu.rs`, selecting
+  `lower_aggregate` for a single-aggregate `PlanNode::Aggregate`, else
+  falling back to the existing top-k shape; wire `explain.rs`'s
+  `explain_gpu` to call it instead of hardcoding `emit_topk`. `planner.rs`'s
+  `Dispatch` stays untouched (whole-plan CPU/GPU flag) — this remains
+  `EXPLAIN`-only, not wired into real query execution.
+- [x] Unit tests per `AggregateFunc` variant in `gpu.rs`; a sibling
+  large-scan aggregate test in `explain.rs`; an aggregate smoke test in
+  `crates/out-archon-verify/src/gpu.rs`.
+- [x] New `gpu` CI job in `.github/workflows/ci.yml` (clippy + test with
+  `--features gpu`) — closes a real pre-existing gap: even today's top-k
+  emission path has never run in CI.
+- Out of scope: ML UDF/`Gemm` lowering, any GPU execution, multi-aggregate
+  regions, NULL-aware COUNT semantics.
+
+### 11.2 User-space driver framework, v1 (`tpt-archon-kernel`)
+Scoped to a sandbox-testable mock (no real hardware/interrupt controller/
+bare-metal target exists anywhere in this repo) — proves the "interrupt ->
+capability-checked IPC message -> driver task wakes" plumbing end-to-end,
+mirroring how `io_uring_backend.rs` validated its `Reactor`/`Task` pattern.
+- [x] New `crates/tpt-archon-kernel/src/driver.rs` (always compiled, no new
+  Cargo feature): `Driver` trait, `DriverTask<D: Driver>` adapting a driver
+  into an ordinary `scheduler::Task`, and `MockInterruptSource` that injects
+  capability-checked IPC messages on demand (no timer, no OS event source).
+- [x] `Resource::Device(u64)` added to `crates/tpt-archon-bridge/src/
+  capability.rs`'s `Resource` enum, gating who may stand up a `DriverTask`
+  for a given device; actual message delivery still flows through the
+  existing `Resource::Channel` checks in `MessageRouter`.
+- [x] `pub mod driver;` in `crates/tpt-archon-kernel/src/lib.rs`.
+- [x] Tests: mock interrupt wakes a spawned `DriverTask` via `Scheduler`;
+  denied without (or with revoked) read capability; `MockInterruptSource`
+  denied without write capability; `Resource::Device` mint/authorize/revoke
+  coverage in `capability.rs` matching the existing `Page`/`Channel` cases.
+- Out of scope (explicit v2 follow-ups, not silently dropped): real UIO/VFIO
+  device wrapping, real interrupt controllers, bare-metal targets, `no_std`
+  interrupt handlers, driver priority/preemption, device-discovery tables.
+
+### 11.3 Writable mmap path (`tpt-archon-core`)
+Chosen direction: ordered `flush_range`, not LMDB-style copy-on-write — COW
+was rejected as structurally not additive (the B-Link tree has no
+page-addressing concept today; COW would mean inventing page-backed B-Link
+storage first, a separate, much larger project). `BlockDevice`'s existing
+two-phase `write_block`/`sync` contract (already how `FileBlockDevice`
+works) needs **zero changes to `storage.rs`/`page.rs`** — a new device just
+becomes another valid `D: BlockDevice`.
+- [x] New `crates/tpt-archon-core/src/block/mmap_mut.rs`:
+  `MmapWritableBlockDevice` wrapping `memmap2::MmapMut`; `write_block`
+  memcpys into the mapping and widens a coalesced dirty span; `sync` calls
+  `flush_range` over that span (the actual durability point) and maps
+  errors to `StorageError::SyncFailed`.
+- [x] Gate behind a new `mmap-write` Cargo feature (`= ["mmap"]`), separate
+  from read-only `mmap` so existing read-only consumers aren't silently
+  handed write capability; forward through `tpt-archon-bridge`/
+  `tpt-archon-kernel` `Cargo.toml` but do **not** wire a write path into
+  `MmapPageSource`/`MmapPageCache`/`UnifiedMemory` — stays core-crate-only.
+- [x] Document (not solve) the real new hazard: intra-page tearing between a
+  live `Mmap` reader and a live `MmapMut` writer of the same file (both
+  `MAP_SHARED`, near-instant cross-mapping visibility with no tearing
+  guarantee) — v1 mitigation is intra-process ownership (no `Clone`) plus
+  documentation-only cross-handle/cross-process exclusivity, matching the
+  existing read-only module's own precedent.
+- [x] Tests: write-then-flush-then-reopen round trip; write-without-sync is
+  live in the mapping and `sync` is the durability point (idempotent re-sync);
+  coalesced dirty-span flush over a non-contiguous written range; out-of-bounds
+  write/read rejected. The `faultsim` torn-tail re-run is intentionally
+  **not** ported — the existing `faultsim` harness requires `Clone` with
+  independent-copy semantics a file/mmap device can't provide (see this
+  bullet's own caveat), so torn-tail coverage stays on `InMemoryBlockDevice`.
+- [x] New `mmap-write` CI job running on **both** `ubuntu-latest` and
+  `windows-latest` — `flush_range`/`FlushViewOfFile` durability semantics
+  are documented to differ across platforms.
+- Out of scope: concurrent multi-process mmap access, per-block-precision
+  dirty tracking, wiring into bridge/kernel's zero-copy cache, fsyncing the
+  in-memory `Wal` itself (pre-existing, unrelated gap), re-verifying
+  `formal-proofs/wal.telos` against the new device.
+
+---
+
+## Phase 12 — Production readiness hardening
+
+Tracking the gaps called out when the repo was assessed as "not production
+ready" (see the README Status section). The four shippable crates are now
+published to crates.io, so the remaining work is correctness, durability,
+concurrency, PostgreSQL-completeness, operations, and verification maturity —
+not packaging. Items are ordered by blocker severity. **12.1 is implemented;
+12.2–12.8 are tracked and not yet started.**
+
+### 12.1 Durable, fsync'd WAL — **IMPLEMENTED (2026-08-08)**
+The previous WAL was in-memory (`crates/tpt-archon-core/src/wal.rs`: `bytes:
+Vec<u8>`); `StorageEngine::commit` fsync'd the *data* device but never persisted
+the log, so a real crash could not be recovered. Fixed:
+- `StorageEngine` gained `append_commit` / `flush_data` / `reset_wal` (split out
+  of `commit`, which still works for in-memory/test use).
+- `Database` (std facade) now owns a sidecar `<path>.wal` file. `put` records the
+  page in the WAL, **fsyncs the WAL sidecar first**, then flushes + fsyncs the
+  data file — the write-ahead invariant is now honored at the `fsync` boundary,
+  not just logically. `open` replays any committed records from the sidecar and
+  checkpoints (truncates) it.
+- Tests: reopen replays committed writes from the WAL file; a torn WAL tail is
+  tolerated on reopen; a planted WAL (log fsynced, data not yet flushed)
+  repopulates the data device on open.
+- Out of scope (v2): group-commit / batched fsync, WAL segment rotation /
+  archival, incremental checkpointing instead of full-rewrite-per-put, page +
+  WAL frame checksums (see 12.5).
+
+### 12.2 Real concurrency beyond the global mutex — tracked, not started
+Today `Database` has no internal lock; `out-archon-pgwire/src/server.rs:54`
+wraps it in one global `Arc<Mutex<Session>>`, so **all connections serialize
+through a single mutex** — one slow statement blocks every client. MVCC exists
+but execution is single-threaded/optimistic with conflict-abort; per-session
+transaction state and reachable `40001` serialization failures are still
+deferred (Phase 8 B5).
+- [ ] Per-session (not per-`Database`) transaction state in `tpt-archon-relational`
+  (unlocks per-statement vs per-transaction locking and reachable `40001`).
+- [ ] Replace the global `Arc<Mutex<Session>>` with per-connection/per-transaction
+  state so reads can proceed concurrently; only conflicting writes serialize.
+- [ ] Wire the `io-uring-backend` reactor (`tpt-archon-kernel`) into connection
+  I/O so the async scheduler actually drives multiple connections.
+- [ ] Add statement timeouts / cancellation so a runaway query can't wedge the
+  whole server (closes the `LIMIT n` unbounded-DoS gap, TODO line 170).
+- Out of scope: distributed/concurrent multi-writer B-Link tree (separate,
+  much larger project; the tree is "concurrency-ready layout" but single-threaded
+  today).
+
+### 12.3 PostgreSQL wire completeness — tracked, not started
+- [ ] `pg_catalog` emulation (at least `pg_namespace`, `pg_class`, `pg_attribute`,
+  `pg_type`) so ORMs and schema-introspecting drivers stop breaking.
+- [ ] SCRAM-SHA-256 auth (Phase 8 B5 deferred) — replace `trust`/cleartext.
+- [ ] TLS transport (Phase 8 B5 deferred).
+- [ ] Remaining dialect gaps as needed: stored procedures/functions, triggers,
+  sequences/identity, broader column types, `COPY` (Phase 8 B5).
+
+### 12.4 Constraints & referential integrity — tracked, not started
+- [ ] `NOT NULL`, `UNIQUE`, `CHECK`, `PRIMARY KEY` enforcement at the storage/exec
+  layer.
+- [ ] Foreign-key (referential integrity) enforcement — currently none.
+- [ ] A broader, documented column-type matrix.
+
+### 12.5 On-disk checksums — tracked, not started
+- [ ] Page-frame checksums in `tpt-archon-core` (defend against silent disk
+  corruption; relational has a row-decode checksum from Phase 5.1, but core
+  pages/WAL frames do not).
+- [ ] WAL frame checksums (complements 12.1; lets replay reject corrupt frames
+  instead of relying solely on `Wal::from_bytes` framing/truncation).
+
+### 12.6 Operations & deployment — tracked, not started
+- [ ] Backup / restore tooling and WAL shipping / point-in-time recovery (PITR).
+- [ ] Replication / high availability (primary + replica via WAL shipping).
+- [ ] Configuration surface, structured observability/logging, metrics.
+- [ ] Resource caps (statement memory, `LIMIT` bound) — closes the DoS gap.
+
+### 12.7 Verification maturity — tracked, not started
+- [ ] Promote `out-archon-verify` from an opt-in/non-blocking harness to a
+  **required** CI gate (today `pg-compat` is `continue-on-error`; the eidos/telos
+  checks are not blocking).
+- [ ] Pursue machine-checked proofs (Coq/Lean) for the safety claims in
+  `spec.txt` (zero-CVE, zero-silent-corruption, zero-race). Today `out-archon-verify`
+  is solver-checked QF_LRA assertion harnesses, not machine-checked proofs
+  (ADR 0003) — the marketing claims are explicitly deferred until proven.
+
+### 12.8 GPU execution path — tracked, not started
+- [ ] Today `gpu` is emission-only. A real execution path (consuming the emitted
+  TPTIR on an external GPU backend) remains out of scope until a concrete target
+  exists. Not a correctness blocker; tracked for completeness.

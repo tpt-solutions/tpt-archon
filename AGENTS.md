@@ -79,6 +79,16 @@ crates.io version requirements — `tpt-eidos-verifier` 0.2.0,
   ecosystem. Zero-allocation primitives are implemented inline in
   `tpt-archon-core`; do not add a dependency on a crate named that.
 
+## Crate-sync hazard: pgwire SQLSTATE match
+`out-archon-pgwire`'s `db_error_to_sqlstate` is a **deliberately exhaustive**
+match (no wildcard arm, by Phase 8 B2 design) mapping `tpt-archon-relational`'s
+`DbError`/`ExecError` to PostgreSQL SQLSTATE codes. Adding, renaming, or
+removing a variant in `DbError` (`database/schema.rs`) or `ExecError`
+(`executor/value.rs`) **must** be mirrored in that match — otherwise the whole
+workspace fails to compile. Validate any such change with `cargo test
+--workspace`, not a single `-p` crate, or a missing arm will ship red
+(see `TODO.md` Phase 10.5: this exact gap broke `master`).
+
 ## Testing conventions
 Every crate has unit tests colocated in `src/`. Add integration tests under
 `tests/` once a crate's public surface stabilizes. `benches/` holds Criterion

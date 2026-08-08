@@ -21,6 +21,10 @@ std = ["tpt-archon-core/std"]
 # feature comment for the rationale (read-only, cross-platform, no target
 # gating needed).
 mmap = ["std", "tpt-archon-core/mmap"]
+# Writable (msync-ordered) mmap block device, forwarded from
+# `tpt-archon-core`. Off by default; see that crate's feature comment. Not
+# wired into the bridge's zero-copy cache — core-crate-only by design.
+mmap-write = ["mmap", "tpt-archon-core/mmap-write"]
 
 [dependencies]
 # Path dep during development; switch to a version requirement before publishing

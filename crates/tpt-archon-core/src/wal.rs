@@ -21,6 +21,7 @@
 
 use alloc::vec::Vec;
 
+use crate::checksum::crc32;
 use crate::zerocopy::{Cursor, OutOfSpace, Reader};
 
 /// A Log Sequence Number: a monotonically increasing record identifier.
@@ -91,19 +92,6 @@ impl From<OutOfSpace> for WalError {
 //   [payload_len] payload
 //   u32 crc32   (over: lsn..=payload)
 const HEADER_LEN: usize = 8 + 1 + 8 + 4; // lsn + kind + block_id + payload_len
-
-/// CRC32 (IEEE) over `data`, implemented inline (no external crate).
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
-}
 
 impl WalRecord {
     /// The number of bytes this record occupies on disk (including framing).

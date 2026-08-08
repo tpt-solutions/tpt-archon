@@ -160,6 +160,23 @@ jobs:
         # not a `default` feature (see the crate's Cargo.toml comment).
         run: cargo test -p tpt-archon-kernel --features io-uring-backend
 
+  gpu:
+    name: GPU IR emission (gpu feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (gpu feature)
+        run: cargo clippy --workspace --features gpu --all-targets -- -D warnings
+      - name: Test GPU IR emission
+        # The `gpu` feature was never exercised in CI before — both the
+        # top-k emission path (existing) and the new aggregate lowering
+        # (Phase 11.1) run here so a regression can't ship silently.
+        run: cargo test --workspace --features gpu
+
   mmap:
     name: mmap zero-copy read path (cross-platform)
     strategy:
@@ -180,4 +197,24 @@ jobs:
         # cross-platform, so this runs (and is verified) on both Linux and
         # Windows, not just Linux.
         run: cargo test --workspace --features mmap
+
+  mmap-write:
+    name: mmap writable path (msync-ordered, cross-platform)
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (mmap-write feature)
+        # `mmap-write` implies `mmap` (read-only mmap stays a separate
+        # feature); `flush_range`/`FlushViewOfFile` durability semantics differ
+        # across platforms, so this is verified on both Linux and Windows.
+        run: cargo clippy --workspace --features mmap-write --all-targets -- -D warnings
+      - name: Test mmap writable path
+        run: cargo test --workspace --features mmap-write
 
