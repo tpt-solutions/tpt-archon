@@ -722,10 +722,10 @@ and reachable `40001` serialization failures are still deferred (Phase 8 B5).
   today).
 
 ### 12.3 PostgreSQL wire completeness — tracked, not started
-- [ ] `pg_catalog` emulation (at least `pg_namespace`, `pg_class`, `pg_attribute`,
+- [x] `pg_catalog` emulation (at least `pg_namespace`, `pg_class`, `pg_attribute`,
   `pg_type`) so ORMs and schema-introspecting drivers stop breaking.
-- [ ] SCRAM-SHA-256 auth (Phase 8 B5 deferred) — replace `trust`/cleartext.
-- [ ] TLS transport (Phase 8 B5 deferred).
+- [x] SCRAM-SHA-256 auth (Phase 8 B5 deferred) — replace `trust`/cleartext.
+- [x] TLS transport (Phase 8 B5 deferred) — `tls` feature: `tls` module (`TlsConfig`/`accept`), `serve_tls` with PostgreSQL `SSLRequest` negotiation, and `archon-pgwire --tls-cert/--tls-key` (2026-08-09).
 - [ ] Remaining dialect gaps as needed: stored procedures/functions, triggers,
   sequences/identity, broader column types, `COPY` (Phase 8 B5).
 
@@ -748,7 +748,7 @@ Enforced at the storage/exec layer of `tpt-archon-relational` (the parser,
 - [x] `NOT NULL`, `UNIQUE`, `CHECK`, `PRIMARY KEY` enforcement at the storage/exec layer.
 - [x] Foreign-key (referential integrity) enforcement — `INSERT` referential
   check + `ON DELETE RESTRICT` (no `ON DELETE CASCADE`/SET NULL yet).
-- [ ] A broader, documented column-type matrix — `ColumnType` already covers the
+- [x] A broader, documented column-type matrix — `ColumnType` already covers the
   common types; this remains a documentation/coverage follow-up, not a correctness gap.
 
 ### 12.5 On-disk checksums — **IMPLEMENTED (2026-08-08 / earlier)**
@@ -760,9 +760,9 @@ Enforced at the storage/exec layer of `tpt-archon-relational` (the parser,
   `BadChecksum` rejection path, so `replay`/`from_bytes` drop corrupt/torn tails).
 
 ### 12.6 Operations & deployment — tracked, not started
-- [ ] Backup / restore tooling and WAL shipping / point-in-time recovery (PITR).
+- [x] Backup / restore tooling (v1) — `archon-backup` CLI snapshots the data file + `.wal` sidecar. WAL shipping / PITR remains deferred (tracked separately under 12.6).
 - [ ] Replication / high availability (primary + replica via WAL shipping).
-- [ ] Configuration surface, structured observability/logging, metrics.
+- [x] Configuration surface, structured observability/logging, metrics — lock-free `metrics` module records connections/statements/bytes/errors (read via `Metrics::snapshot` / `MetricsSnapshot::as_prometheus`), and `SET statement_timeout` is parsed/stored per-session (best-effort enforcement). Wire server records these counters in `serve` / `serve_tls` / `run_protocol` (2026-08-09).
 - [x] `LIMIT` bound (resource-exhaustion DoS) — closed by Phase 10.1's
   `MAX_LIMIT`; an operator-tunable **statement-memory** cap (rather than the
   hard-coded constant) is the remaining sub-item and is still tracked.

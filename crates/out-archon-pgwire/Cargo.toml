@@ -15,6 +15,8 @@ description = "PostgreSQL wire-protocol server for tpt-archon (non-published, de
 [features]
 default = ["std"]
 std = []
+# Optional TLS transport for the wire server. Off by default; see `tls` module.
+tls = ["dep:rustls", "dep:rustls-pemfile"]
 
 [dependencies]
 tpt-archon-relational = { path = "../tpt-archon-relational", version = "0.1.0", features = ["std"] }
@@ -24,6 +26,8 @@ rand = "0.8"
 bytes = "1.0"
 sha2 = "0.10"
 hmac = "0.12"
+rustls = { version = "0.21", optional = true }
+rustls-pemfile = { version = "1", optional = true }
 
 [dev-dependencies]
 postgres = "0.19"
