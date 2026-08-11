@@ -1,5 +1,15 @@
 # tpt-archon
 
+[![CI](https://github.com/tpt-solutions/tpt-archon/actions/workflows/ci.yml/badge.svg)](https://github.com/tpt-solutions/tpt-archon/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
+| Crate | crates.io | docs.rs |
+|---|---|---|
+| `tpt-archon-core` | [![crates.io](https://img.shields.io/crates/v/tpt-archon-core.svg)](https://crates.io/crates/tpt-archon-core) | [![docs.rs](https://img.shields.io/docsrs/tpt-archon-core)](https://docs.rs/tpt-archon-core) |
+| `tpt-archon-bridge` | [![crates.io](https://img.shields.io/crates/v/tpt-archon-bridge.svg)](https://crates.io/crates/tpt-archon-bridge) | [![docs.rs](https://img.shields.io/docsrs/tpt-archon-bridge)](https://docs.rs/tpt-archon-bridge) |
+| `tpt-archon-kernel` | [![crates.io](https://img.shields.io/crates/v/tpt-archon-kernel.svg)](https://crates.io/crates/tpt-archon-kernel) | [![docs.rs](https://img.shields.io/docsrs/tpt-archon-kernel)](https://docs.rs/tpt-archon-kernel) |
+| `tpt-archon-relational` | [![crates.io](https://img.shields.io/crates/v/tpt-archon-relational.svg)](https://crates.io/crates/tpt-archon-relational) | [![docs.rs](https://img.shields.io/docsrs/tpt-archon-relational)](https://docs.rs/tpt-archon-relational) |
+
 **tpt-archon** is a vertically integrated, proof-native computing stack that
 eliminates the boundaries between storage, operating system, and database.
 Built inside-out on Rust's ownership model and formal verification, it unifies
@@ -158,6 +168,8 @@ emulation).
 | Embed the database from Node.js | `archon-node` (crate `out-archon-node`, not published to crates.io -- ships to npm) | [`crates/out-archon-node/README.md`](crates/out-archon-node/README.md) |
 | Scaffold a new project | `template/` | `cargo generate --path template` |
 | Formal-verification harness | `out-archon-verify` (not published) | `cargo test -p out-archon-verify` |
+
+See [`docs/EXAMPLES.md`](docs/EXAMPLES.md) for a use-case-indexed cookbook of runnable examples across all four crates.
 
 ## Build
 

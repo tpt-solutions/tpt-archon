@@ -140,4 +140,5 @@ and asserts `StorageEngine::recover` always yields a prefix-consistent state.
   TPTIR.
 
 See [`TODO.md`](TODO.md) for the live, per-phase checklist and what remains
-deferred.
+deferred. See [`EXAMPLES.md`](EXAMPLES.md) for a use-case-indexed cookbook of
+runnable examples once you know what you're trying to build.
