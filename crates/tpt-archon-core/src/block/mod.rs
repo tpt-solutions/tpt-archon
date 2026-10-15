@@ -60,6 +60,10 @@ pub enum StorageError {
     /// The buffer pool is full and every frame is pinned, so no page could be
     /// evicted to make room.
     AllFramesPinned,
+    /// The buffer pool holds only uncommitted dirty pages, and the engine does
+    /// not write uncommitted pages to the device to make room. Commit the batch
+    /// (or use a larger pool) and retry.
+    UncommittedPagesPinned,
     /// The operation is not supported by this backend (e.g. writing to a
     /// read-only [`MmapBlockDevice`](crate::block::MmapBlockDevice)).
     Unsupported,
@@ -90,6 +94,12 @@ impl fmt::Display for StorageError {
             StorageError::SyncFailed => write!(f, "sync to durable storage failed"),
             StorageError::AllFramesPinned => {
                 write!(f, "buffer pool full: all frames are pinned")
+            }
+            StorageError::UncommittedPagesPinned => {
+                write!(
+                    f,
+                    "buffer pool full of uncommitted pages: commit or enlarge the pool"
+                )
             }
             StorageError::Unsupported => {
                 write!(f, "operation not supported by this backend")

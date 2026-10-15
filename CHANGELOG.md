@@ -8,8 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tpt-archon-core`: `StorageEngine::commit_durable(persist)`, the commit path
+  that enforces write-ahead ordering. It appends the `Commit` marker, hands the
+  complete log to `persist`, and only then flushes data pages.
+- `tpt-archon-core`: `StorageError::UncommittedPagesPinned`, returned when a
+  write would need an uncommitted page written to the device to make room.
+
 ### Changed
+- `tpt-archon-core` (breaking): `StorageEngine::commit()` is removed. It flushed
+  data before the caller could persist the log. Use `commit_durable`.
+- `tpt-archon-core`: `StorageEngine` uses a no-steal buffer pool. Dirty pages
+  are never written to the device by eviction. A batch must fit in the pool.
+- `tpt-archon-core`: `StorageEngine::append_commit` and `flush_data` are no
+  longer public. Calling them out of order was the defect.
+
 ### Fixed
+- `tpt-archon-core`: uncommitted pages evicted to the device survived recovery.
+  Recovery is redo-only and never undid them. Under no-steal they never reach
+  the device before commit.
+- `tpt-archon-core`: `write_page` logged a record before it could fail (out of
+  bounds, or no room in the pool). A later commit could then make a write the
+  caller had been told failed become durable. Failed writes now leave no record.
 
 ## [0.1.0] - 2026-08-05
 

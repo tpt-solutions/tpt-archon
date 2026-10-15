@@ -83,7 +83,7 @@ pub fn trial<D: BlockDevice + Clone>(
             let page = vec![i as u8; crate::page::PAGE_SIZE];
             e.write_page(i as u64, &page).unwrap();
         }
-        e.commit().unwrap();
+        e.commit_durable(|_| Ok(())).unwrap();
         log = e.wal_bytes().to_vec();
     }
 
@@ -162,7 +162,7 @@ where
                 let page = vec![i as u8; crate::page::PAGE_SIZE];
                 e.write_page(i as u64, &page).unwrap();
             }
-            e.commit().unwrap();
+            e.commit_durable(|_| Ok(())).unwrap();
             log = e.wal_bytes().to_vec();
         }
         let corrupted = fault.apply(&log);

@@ -144,6 +144,10 @@ pub struct BufferPool<D: BlockDevice> {
     frames: Vec<Frame>,
     /// LRU order of *frame indices*: front = least recently used.
     lru: VecDeque<usize>,
+    /// Whether a dirty frame may be written back to the device to make room
+    /// (steal). When `false` (no-steal) only clean frames are evicted, so the
+    /// device never holds a page image that has not been committed.
+    steal: bool,
 }
 
 impl<D: BlockDevice> BufferPool<D> {
@@ -163,7 +167,32 @@ impl<D: BlockDevice> BufferPool<D> {
             capacity,
             frames: Vec::new(),
             lru: VecDeque::new(),
+            steal: true,
         }
+    }
+
+    /// Switches the pool to no-steal: dirty frames are never written back to
+    /// the device by eviction. A caller that needs more room than the clean
+    /// frames provide gets [`StorageError::UncommittedPagesPinned`] instead,
+    /// and must commit (flush) before retrying.
+    pub fn no_steal(mut self) -> Self {
+        self.steal = false;
+        self
+    }
+
+    /// The underlying device, read-only.
+    pub fn device(&self) -> &D {
+        &self.device
+    }
+
+    /// Ensures a frame can be assigned to `block_id` without writing anything
+    /// that is not already allowed to be written. Returns an error, and changes
+    /// no frame contents, when the pool has no room.
+    pub fn reserve(&mut self, block_id: BlockId) -> Result<(), StorageError> {
+        if self.find(block_id).is_none() {
+            self.acquire_frame()?;
+        }
+        Ok(())
     }
 
     /// Number of frames currently resident.
@@ -194,11 +223,11 @@ impl<D: BlockDevice> BufferPool<D> {
     /// dirty. Returns the evicted frame index, or `None` if every frame is
     /// pinned.
     fn evict(&mut self) -> Result<Option<usize>, StorageError> {
-        let victim = self
-            .lru
-            .iter()
-            .copied()
-            .find(|&i| !matches!(self.frames[i].state, PageState::Pinned(_)));
+        let steal = self.steal;
+        let victim = self.lru.iter().copied().find(|&i| {
+            let state = self.frames[i].state;
+            !matches!(state, PageState::Pinned(_)) && (steal || state != PageState::Dirty)
+        });
         let Some(idx) = victim else {
             return Ok(None);
         };
@@ -308,6 +337,9 @@ impl<D: BlockDevice> BufferPool<D> {
         // Otherwise evict.
         match self.evict()? {
             Some(idx) => Ok(idx),
+            None if self.frames.iter().any(|f| f.state == PageState::Dirty) => {
+                Err(StorageError::UncommittedPagesPinned)
+            }
             None => Err(StorageError::AllFramesPinned),
         }
     }

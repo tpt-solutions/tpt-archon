@@ -20,6 +20,12 @@ use std::io::{Read, Seek, Write};
 
 /// A storage engine: a buffer pool whose page modifications are first recorded
 /// in a write-ahead log.
+///
+/// The pool is no-steal: a page modified since the last commit is never written
+/// to the device by eviction. So the device only ever holds committed page
+/// images, and recovery never has to undo anything. The cost is that a batch
+/// must fit in the pool: a write that would need an uncommitted page evicted
+/// fails with [`StorageError::UncommittedPagesPinned`] before anything is logged.
 pub struct StorageEngine<D: BlockDevice> {
     pool: BufferPool<D>,
     wal: Wal,
@@ -29,7 +35,7 @@ impl<D: BlockDevice> StorageEngine<D> {
     /// Creates an engine over `device`, caching at most `capacity` pages.
     pub fn new(device: D, capacity: usize) -> Self {
         Self {
-            pool: BufferPool::new(device, capacity),
+            pool: BufferPool::new(device, capacity).no_steal(),
             wal: Wal::new(),
         }
     }
@@ -40,7 +46,11 @@ impl<D: BlockDevice> StorageEngine<D> {
     /// Writes `page` (exactly [`PAGE_SIZE`] bytes) to `block_id`, recording the
     /// change in the WAL *first* (the write-ahead invariant) and then staging it
     /// in the buffer pool. The mutation is not durable until
-    /// [`commit`](StorageEngine::commit) flushes both log and page.
+    /// [`commit_durable`](StorageEngine::commit_durable) persists the log and
+    /// flushes the page.
+    ///
+    /// On error nothing is left behind: no log record survives, so a later
+    /// commit cannot make a failed write durable.
     pub fn write_page(&mut self, block_id: BlockId, page: &[u8]) -> Result<(), StorageError> {
         if page.len() != PAGE_SIZE {
             return Err(StorageError::ShortWrite {
@@ -48,12 +58,31 @@ impl<D: BlockDevice> StorageEngine<D> {
                 expected: PAGE_SIZE,
             });
         }
-        // Write-ahead: log the full page image before touching main storage.
+        let block_count = self.pool.device().block_count();
+        if block_id >= block_count {
+            return Err(StorageError::OutOfBounds {
+                block_id,
+                block_count,
+            });
+        }
+        // Make room first, without writing anything: fails here, before the log
+        // is touched, if the pool holds only uncommitted pages.
+        self.pool.reserve(block_id)?;
+
+        // Write-ahead: log the full page image before touching the frame.
+        let (log_len, log_lsn) = (self.wal.as_bytes().len(), self.wal.next_lsn());
         self.wal.append(RecordKind::PageWrite, block_id, page);
-        let frame = self.pool.fetch_mut(block_id)?;
-        frame.as_bytes_mut().copy_from_slice(page);
-        self.pool.unpin(block_id);
-        Ok(())
+        match self.pool.fetch_mut(block_id) {
+            Ok(frame) => {
+                frame.as_bytes_mut().copy_from_slice(page);
+                self.pool.unpin(block_id);
+                Ok(())
+            }
+            Err(e) => {
+                self.wal.truncate(log_len, log_lsn);
+                Err(e)
+            }
+        }
     }
 
     /// Reads `block_id` through the buffer pool (loaded from the device on a
@@ -70,14 +99,14 @@ impl<D: BlockDevice> StorageEngine<D> {
     /// caller (see the `Database` std facade, which fsyncs the WAL sidecar file
     /// *before* flushing the data device so the write-ahead invariant holds at
     /// the fsync boundary, not just logically).
-    pub fn append_commit(&mut self) -> Result<(), StorageError> {
+    pub(crate) fn append_commit(&mut self) -> Result<(), StorageError> {
         self.wal.append(RecordKind::Commit, 0, &[]);
         Ok(())
     }
 
     /// Flushes all dirty pool frames to the device and syncs it (the data-
     /// durable half of a commit).
-    pub fn flush_data(&mut self) -> Result<(), StorageError> {
+    pub(crate) fn flush_data(&mut self) -> Result<(), StorageError> {
         self.pool.flush_all()
     }
 
@@ -88,13 +117,29 @@ impl<D: BlockDevice> StorageEngine<D> {
         self.wal = Wal::new();
     }
 
-    /// Commits the current batch of writes: appends a commit marker and flushes
-    /// the data device. The WAL remains in-memory; callers wanting a durable,
-    /// fsynced log (crash-recoverable file database) must persist
-    /// [`wal_bytes`](StorageEngine::wal_bytes) to a sidecar and fsync it
-    /// *before* calling this (see the `Database` std facade).
-    pub fn commit(&mut self) -> Result<(), StorageError> {
+    /// Commits the current batch of writes in the order write-ahead logging
+    /// requires:
+    ///
+    /// 1. append a `Commit` marker to the log;
+    /// 2. pass the complete log to `persist`, which must make it durable (for
+    ///    example write it to a sidecar file and fsync it);
+    /// 3. flush the dirty pages to the device.
+    ///
+    /// Step 2 is a closure so that the caller cannot flush before persisting.
+    /// If `persist` fails, the commit marker is removed again, so the batch stays
+    /// uncommitted and a later commit cannot make it durable behind the caller's
+    /// back. If the flush fails after `persist` succeeded, the batch is committed
+    /// and [`recover`](Self::recover) will replay it.
+    pub fn commit_durable<F>(&mut self, persist: F) -> Result<(), StorageError>
+    where
+        F: FnOnce(&[u8]) -> Result<(), StorageError>,
+    {
+        let (log_len, log_lsn) = (self.wal.as_bytes().len(), self.wal.next_lsn());
         self.append_commit()?;
+        if let Err(e) = persist(self.wal.as_bytes()) {
+            self.wal.truncate(log_len, log_lsn);
+            return Err(e);
+        }
         self.flush_data()
     }
 
@@ -112,7 +157,7 @@ impl<D: BlockDevice> StorageEngine<D> {
     /// A `PageWrite` is only applied once an intact `Commit`/`Checkpoint`
     /// record for it is seen later in the log; any `PageWrite`s with no such
     /// record following them (a crash between [`write_page`](Self::write_page)
-    /// and [`commit`](Self::commit) leaves a fully-formed, non-torn
+    /// and [`commit_durable`](Self::commit_durable) leaves a fully-formed, non-torn
     /// `PageWrite` record with no trailing commit marker) are dropped, same as
     /// a torn/corrupt tail is. After recovery the device reflects exactly the
     /// durable, committed writes.
@@ -151,6 +196,8 @@ impl<D: BlockDevice> StorageEngine<D> {
 mod tests {
     use super::*;
     use crate::block::InMemoryBlockDevice;
+    use alloc::rc::Rc;
+    use core::cell::Cell;
 
     fn page_of(byte: u8) -> alloc::vec::Vec<u8> {
         alloc::vec![byte; PAGE_SIZE]
@@ -169,7 +216,7 @@ mod tests {
         e.write_page(1, &page_of(0x11)).unwrap();
         // WAL carries the PageWrite record; committing makes it durable.
         assert!(!e.wal_bytes().is_empty());
-        e.commit().unwrap();
+        e.commit_durable(|_| Ok(())).unwrap();
 
         // The WAL prefix must contain the full page image.
         let log = e.wal_bytes().to_vec();
@@ -194,7 +241,7 @@ mod tests {
             let mut e = StorageEngine::new(dev.clone(), 2);
             e.write_page(0, &page_of(0x01)).unwrap();
             e.write_page(2, &page_of(0x02)).unwrap();
-            e.commit().unwrap();
+            e.commit_durable(|_| Ok(())).unwrap();
             log = e.wal_bytes().to_vec();
         }
 
@@ -219,7 +266,7 @@ mod tests {
         let dev = InMemoryBlockDevice::new(4);
         let mut e = StorageEngine::new(dev.clone(), 2);
         e.write_page(0, &page_of(0x07)).unwrap();
-        e.commit().unwrap();
+        e.commit_durable(|_| Ok(())).unwrap();
         let mut log = e.wal_bytes().to_vec();
         // Corrupt the tail so only the valid prefix survives.
         let len = log.len();
@@ -249,7 +296,7 @@ mod tests {
         {
             let mut e = StorageEngine::new(dev.clone(), 2);
             e.write_page(0, &page_of(0x01)).unwrap();
-            e.commit().unwrap();
+            e.commit_durable(|_| Ok(())).unwrap();
             // A second write with no matching commit — simulates a crash
             // between `write_page` and `commit`.
             e.write_page(1, &page_of(0x02)).unwrap();
@@ -263,6 +310,125 @@ mod tests {
         // Block 1's write was never committed, so it must not have reached
         // the device — this reads back the zero-initialized default.
         assert_eq!(e2.read_page(1).unwrap()[0], 0x00);
+    }
+
+    /// Counts device writes so tests can see when data reaches the device.
+    struct CountingDevice {
+        inner: InMemoryBlockDevice,
+        writes: Rc<Cell<usize>>,
+    }
+
+    impl BlockDevice for CountingDevice {
+        fn read_block(
+            &self,
+            block_id: crate::block::BlockId,
+            buffer: &mut [u8],
+        ) -> Result<(), StorageError> {
+            self.inner.read_block(block_id, buffer)
+        }
+        fn write_block(
+            &mut self,
+            block_id: crate::block::BlockId,
+            data: &[u8],
+        ) -> Result<(), StorageError> {
+            self.writes.set(self.writes.get() + 1);
+            self.inner.write_block(block_id, data)
+        }
+        fn sync(&mut self) -> Result<(), StorageError> {
+            self.inner.sync()
+        }
+        fn block_count(&self) -> u64 {
+            self.inner.block_count()
+        }
+    }
+
+    fn counting(blocks: u64) -> (CountingDevice, Rc<Cell<usize>>) {
+        let writes = Rc::new(Cell::new(0));
+        let dev = CountingDevice {
+            inner: InMemoryBlockDevice::new(blocks),
+            writes: writes.clone(),
+        };
+        (dev, writes)
+    }
+
+    #[test]
+    fn no_steal_refuses_to_evict_an_uncommitted_page() {
+        let (dev, writes) = counting(4);
+        let mut e = StorageEngine::new(dev, 1);
+        e.write_page(0, &page_of(0x01)).unwrap();
+        let log_before = e.wal_bytes().len();
+
+        // The only frame holds an uncommitted page: writing another block would
+        // need that page written to the device, so the write is refused.
+        assert_eq!(
+            e.write_page(1, &page_of(0x02)),
+            Err(StorageError::UncommittedPagesPinned)
+        );
+        assert_eq!(
+            e.wal_bytes().len(),
+            log_before,
+            "refused write leaves no log record"
+        );
+        assert_eq!(writes.get(), 0, "nothing reached the device");
+
+        // Once the batch is committed the pool has room again.
+        e.commit_durable(|_| Ok(())).unwrap();
+        e.write_page(1, &page_of(0x02)).unwrap();
+    }
+
+    #[test]
+    fn commit_persists_the_log_before_any_data_is_flushed() {
+        let (dev, writes) = counting(4);
+        let mut e = StorageEngine::new(dev, 4);
+        e.write_page(0, &page_of(0x07)).unwrap();
+
+        let mut writes_when_persisted = None;
+        e.commit_durable(|log| {
+            writes_when_persisted = Some(writes.get());
+            assert!(!log.is_empty(), "the persisted log includes the commit");
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            writes_when_persisted,
+            Some(0),
+            "no data reached the device before the log was persisted"
+        );
+        assert!(writes.get() > 0, "the data is flushed after persisting");
+    }
+
+    #[test]
+    fn failed_persist_withdraws_the_commit_marker() {
+        let (dev, writes) = counting(4);
+        let mut e = StorageEngine::new(dev, 4);
+        e.write_page(0, &page_of(0x07)).unwrap();
+
+        assert_eq!(
+            e.commit_durable(|_| Err(StorageError::SyncFailed)),
+            Err(StorageError::SyncFailed)
+        );
+        assert_eq!(writes.get(), 0, "a failed commit flushes nothing");
+
+        // The log now ends with the write, not with a commit marker, so a later
+        // commit is the first thing that can make this write durable.
+        let mut last = None;
+        Wal::from_bytes(e.wal_bytes()).replay(|r| last = Some(r.kind));
+        assert_eq!(last, Some(RecordKind::PageWrite));
+
+        e.commit_durable(|_| Ok(())).unwrap();
+        assert!(writes.get() > 0);
+    }
+
+    #[test]
+    fn out_of_bounds_write_is_refused_before_logging() {
+        let mut e = StorageEngine::new(InMemoryBlockDevice::new(2), 2);
+        let before = e.wal_bytes().len();
+        assert!(matches!(
+            e.write_page(9, &page_of(1)),
+            Err(StorageError::OutOfBounds { block_id: 9, .. })
+        ));
+        assert_eq!(e.wal_bytes().len(), before);
     }
 }
 

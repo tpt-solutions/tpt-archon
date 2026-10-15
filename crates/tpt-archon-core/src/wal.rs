@@ -191,6 +191,14 @@ impl Wal {
         self.next_lsn
     }
 
+    /// Drops every record from `byte_len` on and restores `next_lsn`. Used to
+    /// withdraw a record whose operation failed, so that a later commit cannot
+    /// make a write the caller was told had failed become durable.
+    pub(crate) fn truncate(&mut self, byte_len: usize, next_lsn: Lsn) {
+        self.bytes.truncate(byte_len);
+        self.next_lsn = next_lsn;
+    }
+
     /// The raw log bytes, suitable for persisting to a device.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
