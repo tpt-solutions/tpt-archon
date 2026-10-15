@@ -24,7 +24,7 @@ tpt-archon-kernel = { path = "../tpt-archon-kernel", version = "0.1.0" }
 thiserror = "1.0"
 rand = "0.8"
 bytes = "1.0"
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.12"
 rustls = { version = "0.21", optional = true }
 rustls-pemfile = { version = "1", optional = true }
