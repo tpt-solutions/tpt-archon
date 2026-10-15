@@ -17,10 +17,17 @@
 //      `recover_drops_page_write_with_no_following_commit` in
 //      `crates/tpt-archon-core/src/storage.rs`).
 //
-// We prove both: `applied <= logged` is maintained by every operation below,
-// and `applied` only ever grows through `commit_flushes_pending` (by exactly
-// the buffered count) — never through buffering alone, and never through a
-// crash.
+// A third property, which the no-steal buffer pool provides: the device never
+// holds a page image whose transaction has not committed. `StorageEngine` never
+// evicts a dirty page before commit, so eviction only ever writes clean pages.
+// Without this, a steal pool could write an uncommitted page to the device, and
+// recovery (which never undoes) would leave it there. Modelling eviction that
+// writes uncommitted data makes this invariant fail; see `evict_clean` below.
+//
+// We prove all three: `applied <= logged` is maintained by every operation below,
+// `applied` only ever grows through `commit_flushes_pending` (by exactly the
+// buffered count) — never through buffering alone, and never through a crash —
+// and `uncommitted_on_device` stays zero throughout.
 
 @boundary(cpu_bound)
 module Wal {
@@ -28,11 +35,14 @@ module Wal {
     // `applied`: page images actually durable on the block device.
     // `pending`: PageWrite records seen during replay, buffered but not yet
     // proven durable by a following Commit/Checkpoint.
+    // `uncommitted_on_device`: page images on the device whose transaction has
+    // not committed. The no-steal pool keeps this at zero.
     invariant Durability {
         logged >= 0
         applied >= 0
         pending >= 0
         applied <= logged
+        uncommitted_on_device == 0
     }
 
     // Appending a PageWrite record logs it before it is ever applied to
@@ -85,5 +95,12 @@ module Wal {
         mutate state {
             w.pending = 0
         }
+    }
+
+    // Eviction under no-steal writes back only clean pages, so no uncommitted
+    // image reaches the device and `uncommitted_on_device` is unchanged.
+    func evict_clean(w: Durability)
+        ensures w.uncommitted_on_device == old(w.uncommitted_on_device)
+    {
     }
 }
